@@ -1,5 +1,146 @@
+# potentials.py (Complete Modified Version)
+
 import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.preprocessing import MinMaxScaler
 from scipy.optimize import fsolve
+from numba import njit
+
+# Existing two-body and three-body potential functions...
+# (e.g., morse, lj, buckingham, poly2, axilrod, poly3)
+
+# Define the MLP architecture (must match the training architecture)
+class SimpleModel(nn.Module):
+    def __init__(self, input_dim, neuron):
+        super(SimpleModel, self).__init__()
+        self.fc1 = nn.Linear(input_dim, neuron)
+        self.fc2 = nn.Linear(neuron, neuron)
+        self.fc3 = nn.Linear(neuron, 1)
+        
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
+def load_MLP_model(model_path, input_dim, neuron):
+    '''
+    Load the trained MLP model from the specified path.
+    
+    Parameters:
+    - model_path: str, path to the saved MLP model file.
+    - input_dim: int, number of input features.
+    - neuron: int, number of neurons in hidden layers.
+    
+    Returns:
+    - model: nn.Module, loaded MLP model.
+    '''
+    model = SimpleModel(input_dim, neuron)
+    model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
+    model.eval()  # Set to evaluation mode
+    return model
+
+def mlp_potential_function(model, scaler):
+    '''
+    Create a potential energy function using the loaded MLP model.
+    
+    Parameters:
+    - model: nn.Module, loaded MLP model.
+    - scaler: sklearn.preprocessing.MinMaxScaler, fitted scaler for input features.
+    
+    Returns:
+    - V_MLP: callable, function that takes r and returns potential energy.
+    '''
+    def V_MLP(r):
+        '''
+        Compute potential energy using MLP.
+        
+        Parameters:
+        - r: float or np.ndarray, bond lengths.
+        
+        Returns:
+        - potential: float or np.ndarray, predicted potential energy.
+        '''
+        # Ensure r is a numpy array
+        r = np.atleast_2d(r)
+        
+        # Feature processing (must match training)
+        # Assuming r has shape (N, 3) and corresponds to [x1, x2, x3]
+        processed = process_data_batch(r, l=scaler.scale_[0])  # Adjust 'l' as needed
+        inputs = torch.tensor(processed, dtype=torch.float32)
+        with torch.no_grad():
+            outputs = model(inputs)
+            potential = outputs.numpy().flatten()
+        return potential
+    return V_MLP
+
+@njit
+def numerical_derivative(V_func, r, delta=1e-5):
+    '''
+    Compute the numerical derivative of the potential using central difference.
+    
+    Parameters:
+    - V_func: callable, potential energy function.
+    - r: float, bond length.
+    - delta: float, small perturbation.
+    
+    Returns:
+    - dV/dr: float, derivative of the potential.
+    '''
+    return (V_func(r + delta) - V_func(r - delta)) / (2 * delta)
+
+def mlp_derivative_function_numba(V_MLP, delta=1e-5):
+    '''
+    Create a derivative function for the MLP potential using Numba-accelerated numerical differentiation.
+    
+    Parameters:
+    - V_MLP: callable, potential energy function.
+    - delta: float, small perturbation.
+    
+    Returns:
+    - dV_MLP_numba: callable, derivative of the potential.
+    '''
+    @njit
+    def dV_MLP_numba(r):
+        return numerical_derivative(V_MLP, r, delta)
+    
+    return dV_MLP_numba
+
+def process_data_batch(data, l):
+    '''
+    Process raw coordinates into features for the MLP.
+    
+    Parameters:
+    - data: np.ndarray, raw coordinates [r1, r2, r3].
+    - l: float, process parameter (from scaler).
+    
+    Returns:
+    - result: np.ndarray, processed features [x1, x2, x3].
+    '''
+    result = np.zeros_like(data)
+    for i, t in enumerate(data):
+        r1, r2, r3 = t[0], t[1], t[2]
+        y1 = np.exp(-r1 / l)
+        y2 = np.exp(-r2 / l)
+        y3 = np.exp(-r3 / l)
+        p1 = y2 + y3
+        p2 = y2**2 + y3**2
+        p3 = y1
+        x1 = p1
+        x2 = p2**(1 / 2)
+        x3 = p3
+        result[i] = [x1, x2, x3]
+    return result
+
+# Example usage:
+# model_path = 'path_to_saved_mlp_model.pth'
+# scaler = ...  # Load or define the scaler used during training
+# model = load_MLP_model(model_path, input_dim=3, neuron=50)
+# V_MLP = mlp_potential_function(model, scaler)
+# dV_MLP = mlp_derivative_function_numba(V_MLP)
+
 
 # Two body potentials
 def morse(de = 1., alpha = 1., re = 1.):
