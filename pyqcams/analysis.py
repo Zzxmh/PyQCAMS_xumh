@@ -5,7 +5,9 @@ from scipy import integrate
 from itertools import groupby
 from operator import itemgetter
 import os
-from pyqcams2.constants import *
+import sys
+sys.path.append(os.path.abspath("e:\\tasks\\documents_in_pku\\research\\Roaming_NN\\QCAT"))
+from pyqcams.constants import *
 
 fact_sig = (Boh2m*1e2)**2 # bohr^2 to cm^2
 fact_k3 = (Boh2m*1e2)/ttos # sigma*v [cm/s]
