@@ -111,64 +111,54 @@ def load_MLP_model(model_path, input_dim, neuron, process_param_l):
 
 def mlp_potential_function(model):
     '''
-    Create a potential energy function using the loaded MLP model.
+    Create a potential energy function that computes both the potential energy and its partial derivatives with respect to r12, r23, and r31.
 
     Parameters:
     - model: nn.Module, loaded MLP model.
 
     Returns:
-    - V_MLP: callable, function that takes r and returns potential energy.
+    - V_MLP_with_derivatives: callable, function that takes r and returns potential energy and partial derivatives.
     '''
-    def V_MLP(r):
+    def V_MLP_with_derivatives(r):
         '''
-        Compute potential energy using MLP.
+        Compute potential energy and its partial derivatives using the MLP model.
 
         Parameters:
         - r: float or np.ndarray, bond lengths with shape (..., 3).
 
         Returns:
-        - potential: float or np.ndarray, predicted potential energy.
+        - potential: np.ndarray, predicted potential energy.
+        - dVdr12: np.ndarray, partial derivative with respect to r12.
+        - dVdr23: np.ndarray, partial derivative with respect to r23.
+        - dVdr31: np.ndarray, partial derivative with respect to r31.
         '''
         # Ensure r is a numpy array with shape (N, 3)
         r = np.atleast_2d(r).astype(np.float32)
-        inputs = torch.tensor(r, dtype=torch.float32)
-        with torch.no_grad():
-            outputs = model(inputs)
-            potential = outputs.numpy().flatten()
-        return potential
-    return V_MLP
 
-@njit
-def numerical_derivative(V_func, r, delta=1e-5):
-    '''
-    Compute the numerical derivative of the potential using central difference.
+        # Convert to torch tensor and enable gradient computation
+        inputs = torch.tensor(r, dtype=torch.float32, requires_grad=True)
 
-    Parameters:
-    - V_func: callable, potential energy function.
-    - r: float, bond length.
-    - delta: float, small perturbation.
+        # Forward pass
+        outputs = model(inputs)
 
-    Returns:
-    - dV/dr: float, derivative of the potential.
-    '''
-    return (V_func(r + delta) - V_func(r - delta)) / (2 * delta)
+        # Backward pass to compute gradients
+        # Since outputs may be batched, use torch.ones_like to compute gradients for each sample
+        outputs.backward(torch.ones_like(outputs))
 
-def mlp_derivative_function_numba(V_MLP, delta=1e-5):
-    '''
-    Create a derivative function for the MLP potential using Numba-accelerated numerical differentiation.
+        # Get the gradients
+        grads = inputs.grad.detach().numpy()
 
-    Parameters:
-    - V_MLP: callable, potential energy function.
-    - delta: float, small perturbation.
+        # Get the potential energy
+        potential = outputs.detach().numpy().flatten()
 
-    Returns:
-    - dV_MLP_numba: callable, derivative of the potential.
-    '''
-    @njit
-    def dV_MLP_numba(r):
-        return numerical_derivative(V_MLP, r, delta)
-    
-    return dV_MLP_numba
+        # Extract partial derivatives
+        dVdr12 = grads[:, 0]
+        dVdr23 = grads[:, 1]
+        dVdr31 = grads[:, 2]
+
+        return potential, dVdr12, dVdr23, dVdr31
+
+    return V_MLP_with_derivatives
 
 # Two body potentials
 def morse(de=1., alpha=1., re=1.):

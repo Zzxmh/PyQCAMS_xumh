@@ -42,18 +42,6 @@ class Molecule:
         
         # Effective potential including rotational term
         self.Veff = lambda x: self.Vij(x) + self.ji * (self.ji + 1) / (2 * self.mu * x**2)
-        
-        # Attributes for equilibrium and turning points
-        self.E = None
-        self.rp = None
-        self.rm = None
-        self.re = None
-        self.bdry = None
-        self.bdx = None
-        
-        # Attributes for vibrational and rotational primes
-        self.vPrime = None
-        self.jPrime = None
     
     def initialize_potential(self, model=None):
         '''
@@ -67,8 +55,7 @@ class Molecule:
         elif self.potential_type == 'MLP':
             if model is None:
                 raise ValueError("Model must be provided for MLP potential.")
-            V_MLP = mlp_potential_function(model)
-            dV_MLP = mlp_derivative_function_numba(V_MLP)
+            V_MLP,dV_MLP = mlp_potential_function(model)
             return V_MLP, dV_MLP
         else:
             raise ValueError(f"Unsupported potential type: {self.potential_type}")
@@ -203,6 +190,7 @@ class Molecule:
             False if product molecule
 
         '''
+        print(1)
         self.rebound() # Find re, bound
         
         if initial:
@@ -210,10 +198,13 @@ class Molecule:
             if self.Ei is None:
                 self.DVR() # Set evj attribute
                 self.Ei = self.evj[self.vi] # Set internal rovib energy
-
+                print(1)
+            print(1)
             diff = lambda x: self.Ei - self.Vij(x) - self.ji*(self.ji+1)/(2*self.mu*x**2)
+            
             # Find outer turning point
             try:
+                print(1)
                 if self.bdry == 0:
                     self.rp = root_scalar(diff, bracket = [self.re, self.xmax]).root # set rplus
                 else:
@@ -288,9 +279,9 @@ class Trajectory:
         self.E0 = kwargs.get('E0')  # Collision energy in Hartree
         self.b = kwargs.get('b0')   # Impact parameter
         self.R0 = kwargs.get('R0')  # Initial separation (Bohr)
-        self.v1 = self.mol_12.Veff  # Potential of mol_12 (SO2+)
-        self.v2 = self.mol_23.Veff  # Potential of mol_23 (SO+)
-        self.v3 = self.mol_31.Veff  # Potential of mol_31 (O)
+        self.v1 = self.mol_12.Vij  # Potential of mol_12 (SO2+)
+        self.v2 = self.mol_23.Vij  # Potential of mol_23 (SO+)
+        self.v3 = self.mol_31.Vij  # Potential of mol_31 (O)
         self.vtrip = kwargs.get('vt')  # Three-body potential if any
         self.dvtdr12 = kwargs.get('dvtdr12')  # Derivative of three-body potential
         self.dvtdr23 = kwargs.get('dvtdr23')
@@ -310,178 +301,298 @@ class Trajectory:
         self.C1 = self.m1 / (self.m1 + self.m2)
         self.C2 = self.m2 / (self.m1 + self.m2)
         
-        # Initialize dissociation channels
-        self.dissociation_channels = kwargs.get('dissociation_channels', ['SO+', 'O'])
-        
-        # Initialize logging
-        logging.basicConfig(
-            filename='qct_simulation.log',
-            filemode='a',
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            level=logging.INFO
-        )
-        
-        # Initialize counters
-        self.count = {channel: 0 for channel in self.dissociation_channels}
-        self.count['dissociation'] = 0  # Overall dissociation count
-        self.count['rejected'] = 0  # Rejected trajectories due to conservation violations
-        
-        # Initialize final state
-        self.fstate = {
-            'channels': {channel: {'v': None, 'vw': 0.0, 'j': None, 'jw': 0.0} for channel in self.dissociation_channels}
-        }
-        
-        # Initialize random seed if provided
-        if self.seed is not None:
-            np.random.seed(self.seed)
-            torch.manual_seed(self.seed)
-        
-        # Initialize initial conditions
-        self.iCond()
-    
+
+    def set_attrs(self):
+        self.delta_e = [np.nan]
+        self.delta_l = [np.nan]
+        self.wn = [np.nan]
+        self.t = [np.nan]*2
+
+    def set_fstate(self,value):
+        # Set final state for bound molecule
+        self.fstate = value
     def iCond(self):
         '''
-        Initialize initial conditions based on E0 and impact parameter.
+        Generate initial conditions for the system.
         '''
-        # Example: Initialize positions and momenta
-        # This needs to be tailored based on your system
-        pass  # Implement initial condition setup
-    
-    def runT(self):
+        # Reset initial molecule jPrime
+        self.mol_12.set_jPrime(self.ji)
+        # Set turning points for mol_12
+        self.mol_12.turningPts(initial = True)
+
+        # Momentum for relative coordinate
+        p0 = np.sqrt(2*self.mu312*self.E0)
+        p1 = np.sqrt(self.mol_12.ji*(self.mol_12.ji+1))/self.mol_12.rp
+
+        # Initial distance between atom and center of molecule
+        # tau is vibrational period of the initial molecule
+        rng = np.random.default_rng(self.seed)
+        self.R = self.R0 + rng.random()*self.mol_12.tau*p0/self.mu312
+        
+        # Jacobi coordinates
+        # Atom (relative coordinate)
+        rho2x = 0
+        rho2y = self.b # impact parameter
+        rho2z = -np.sqrt(self.R**2-self.b**2)
+
+        # Conjugate momenta for relative coords rho2
+        p2x = 0
+        p2y = 0
+        p2z = p0 
+
+        # Define collision parameters
+        theta = np.arccos(1-2*rng.random())
+        phi = 2*np.pi*rng.random()
+        eta = 2*np.pi*rng.random()
+
+        self.ang = [theta,phi,eta] # Store as input data
+
+        # Molecule (internal coordinate)
+        rho1x = self.mol_12.rp*np.sin(theta)*np.cos(phi)
+        rho1y = self.mol_12.rp*np.sin(theta)*np.sin(phi)
+        rho1z = self.mol_12.rp*np.cos(theta)
+
+        # Conjugate momenta for internal coords rho1
+        p1x = p1*(np.sin(phi)*np.cos(eta)
+                - np.cos(theta)*np.cos(phi)*np.sin(eta))
+        p1y = -p1*(np.cos(phi)*np.cos(eta)
+                + np.cos(theta)*np.sin(phi)*np.sin(eta))
+        p1z = p1*np.sin(theta)*np.sin(eta)
+
+        self.w0 = np.array([rho1x,rho1y,rho1z,rho2x,rho2y,
+                rho2z,p1x,p1y,p1z,p2x,p2y,p2z])
+
+        return self.w0
+        
+    def hamEq(self,t,w):
+        ''' Writes Hamilton's equations as a vector field. 
+            Usage:
+                Input function for scipy.integrate.solve_ivp
+        t, None
+            time
+        w, list
+            state variables; w = [rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, 
+                                p1x, p1y, p1z, p2x, p2y, p2z]
+        p, list
+            state parameters; p = [m1, m2, m3, mu12, mu23, mu31, mu123]
+
+        Math: qdot = dT/dp = d/dp(p^2/2mu) = p/mu; pdot = -dV/dq = -dV/dr*dr/dq
+
+        Requires DERIVATIVES of potential functions. 
         '''
-        Run one trajectory with enhanced dissociation handling.
+        rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w
+        r12, r23, r31 = util.jac2cart(w[:6], self.C1, self.C2)
+
+        # Hamilton's equations (qdot)
+        drho1x = p1x/self.mu12
+        drho1y = p1y/self.mu12        
+        drho1z = p1z/self.mu12 
+        drho2x = p2x/self.mu312
+        drho2y = p2y/self.mu312
+        drho2z = p2z/self.mu312
+
+        # Partial derivatives
+        r12drho1x = rho1x/r12
+        r12drho1y = rho1y/r12
+        r12drho1z = rho1z/r12
+        r23drho1x = (-self.C1*rho2x + self.C1**2*rho1x)/r23
+        r23drho1y = (-self.C1*rho2y + self.C1**2*rho1y)/r23
+        r23drho1z = (-self.C1*rho2z + self.C1**2*rho1z)/r23
+        r23drho2x = (rho2x - self.C1*rho1x)/r23
+        r23drho2y = (rho2y - self.C1*rho1y)/r23
+        r23drho2z = (rho2z - self.C1*rho1z)/r23
+        r31drho1x = (self.C2*rho2x + self.C2**2*rho1x)/r31
+        r31drho1y = (self.C2*rho2y + self.C2**2*rho1y)/r31
+        r31drho1z = (self.C2*rho2z + self.C2**2*rho1z)/r31
+        r31drho2x = (rho2x+self.C2*rho1x)/r31
+        r31drho2y = (rho2y+self.C2*rho1y)/r31
+        r31drho2z = (rho2z+self.C2*rho1z)/r31
+
+        dv12 = self.mol_12.dVij
+        dv23 = self.mol_23.dVij
+        dv31 = self.mol_31.dVij
+
+        # Hamilton's equations (pdot)
+        dP1x = - (dv12(r12)*r12drho1x + dv23(r23)*r23drho1x + dv31(r31)*r31drho1x
+                + self.dvtdr12(r12,r23,r31)*r12drho1x + self.dvtdr23(r12,r23,r31)*r23drho1x + self.dvtdr31(r12,r23,r31)*r31drho1x)
+        dP1y = - (dv12(r12)*r12drho1y + dv23(r23)*r23drho1y + dv31(r31)*r31drho1y
+                + self.dvtdr12(r12,r23,r31)*r12drho1y + self.dvtdr23(r12,r23,r31)*r23drho1y + self.dvtdr31(r12,r23,r31)*r31drho1y)
+        dP1z = - (dv12(r12)*r12drho1z + dv23(r23)*r23drho1z + dv31(r31)*r31drho1z
+                + self.dvtdr12(r12,r23,r31)*r12drho1z + self.dvtdr23(r12,r23,r31)*r23drho1z + self.dvtdr31(r12,r23,r31)*r31drho1z)
+        dP2x = - (dv23(r23)*r23drho2x + dv31(r31)*r31drho2x
+                + self.dvtdr23(r12,r23,r31)*r23drho2x + self.dvtdr31(r12,r23,r31)*r31drho2x)
+        dP2y = - (dv23(r23)*r23drho2y + dv31(r31)*r31drho2y
+                + self.dvtdr23(r12,r23,r31)*r23drho2y + self.dvtdr31(r12,r23,r31)*r31drho2y)
+        dP2z = - (dv23(r23)*r23drho2z + dv31(r31)*r31drho2z
+                + self.dvtdr23(r12,r23,r31)*r23drho2z + self.dvtdr31(r12,r23,r31)*r31drho2z)
+        
+        # Hamilton's equations
+        f = [drho1x, drho1y, drho1z, drho2x, drho2y, drho2z, 
+             dP1x, dP1y, dP1z, dP2x, dP2y, dP2z]
+        return f
+
+def runT(self):
         '''
-        logging.info(f"Starting trajectory: E0={self.E0} Hartree, b={self.b}")
+        Run one trajectory.
+
+        '''
         
-        # Define stopping conditions
-        def stop_r(t, y):
-            # Example stopping condition based on separation
-            r = np.linalg.norm(y[:3] - y[3:6])  # Distance between particles
-            return r - self.r_stop
-        stop_r.terminal = True
-        stop_r.direction = 1
+        # Start fstate at 0
+        self.set_fstate((0,0,0,0)) #v,vw,j,jw
+        self.rejected = 0 # Keep track if trajectory fails
+        self.count = [0,0,0,0,0] # n12,n23,n31,nd,nc
+        self.iCond()
+        self.vi = self.mol_12.get_vi()
+
+
+        def stop1(t,w):
+            '''Stop integration when r12 > "far" AU'''
+            rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w
+            r12 = np.sqrt(rho1x**2+rho1y**2+rho1z**2)
+
+            return r12 - self.R*self.r_stop
+
+        def stop2(t,w):
+            '''Stop integration when r32 > "far" AU'''
+            rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w
+            r23 = np.sqrt((rho2x - self.C1*rho1x)**2
+                        + (rho2y - self.C1*rho1y)**2 
+                        + (rho2z - self.C1*rho1z)**2)
+            return r23 - self.R*self.r_stop
         
-        # Define the ODE system
-        def hamEq(t, y):
-            '''
-            Hamiltonian equations of motion.
-            '''
-            # y contains positions and momenta: [x1, y1, z1, x2, y2, z2, p1x, p1y, p1z, p2x, p2y, p2z]
-            r1 = y[:3]
-            r2 = y[3:6]
-            p1 = y[6:9]
-            p2 = y[9:12]
-            
-            # Compute distances
-            r12 = np.linalg.norm(r1 - r2)
-            
-            # Compute forces using potentials
-            F12 = -self.mu12 * self.v1(r12)  # Assuming v1 is potential energy, derivative gives force
-            # Similarly, compute other forces if necessary
-            
-            # Example: Simple two-body interaction
-            drdt = np.zeros_like(y)
-            drdt[:3] = p1 / self.mu12
-            drdt[3:6] = p2 / self.mu12
-            drdt[6:9] = F12 * (r1 - r2) / r12
-            drdt[9:12] = -F12 * (r1 - r2) / r12
-            
-            return drdt
-        
-        # Integrate equations of motion
-        sol = solve_ivp(
-            fun=hamEq,
-            t_span=(0, self.t_stop),
-            y0=self.w0,  # Initial state vector
-            method='RK45',
-            rtol=self.r_tol,
-            atol=self.a_tol,
-            events=stop_r
-        )
-        
-        self.wn = sol.y
-        self.t = sol.t
-        
-        # Compute Hamiltonian properties
-        etot, epot, ekin, ll = util.hamiltonian(self)
-        self.etot = etot
-        self.epot = epot
-        self.ekin = ekin
-        self.ll = ll
-        
-        # Check conservation
-        self.delta_e = self.etot[-1] - self.etot[0]
-        self.delta_l = self.ll[-1] - self.ll[0]
-        if abs(self.delta_e) > self.econs or abs(self.delta_l) > self.lcons:
-            self.count['rejected'] += 1
-            logging.warning(f"Trajectory rejected due to conservation violation: ΔE={self.delta_e}, ΔL={self.delta_l}")
+        def stop3(t,w):
+            '''Stop integration when r31 > "far" AU'''
+            rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w 
+            r31 = np.sqrt((rho2x + self.C2*rho1x)**2
+                        + (rho2y + self.C2*rho1y)**2 
+                        + (rho2z + self.C2*rho1z)**2)
+            return r31 - self.R*self.r_stop
+
+        stop1.terminal = True
+        stop2.terminal = True
+        stop3.terminal = True
+
+        tscale = self.R/np.sqrt(2*self.E0/self.mu312)
+        wsol = solve_ivp(y0 = self.w0, fun = lambda t,y: self.hamEq(t,y),
+                         t_span = [0,tscale*self.t_stop], method = 'RK45',
+                         rtol = self.r_tol, atol = self.a_tol, events = (stop1,stop2,stop3))
+
+        self.wn = wsol.y
+        self.t = wsol.t
+        x = self.wn[:6] # rho1, rho2
+        En, Vn, Kn, Ln = util.hamiltonian(self)
+       
+        self.delta_e = En[-1] - En[0] # Energy conservation
+        self.delta_l = Ln[-1] - Ln[0] # Momentum conservation
+        if self.delta_e > self.econs:
+            print(f'Energy not conserved less than {self.econs}.')
+            self.rejected+=1
+            return
+        if self.delta_l > self.lcons:
+            print(f'Momentum not conserved less than {self.lcons}.')
+            self.rejected+=1
             return
         
-        # Convert Jacobi to Cartesian
-        r12, r23, r31 = util.jac2cart(self.wn[:6], self.C1, self.C2)
+        r12,r23,r31 = util.jac2cart(x, self.C1, self.C2)
+
+        # Recover vectors
+        rho1x, rho1y, rho1z, rho2x, \
+        rho2y, rho2z, p1x, p1y, p1z, \
+        p2x, p2y, p2z = wsol.y
+
+        # Components
+        r23_x = rho2x - self.C1*rho1x
+        r23_y = rho2y - self.C1*rho1y
+        r23_z = rho2z - self.C1*rho1z
+        r31_x = rho2x + self.C2*rho1x
+        r31_y = rho2y + self.C2*rho1y
+        r31_z = rho2z + self.C2*rho1z
+
+        p23_x = self.mu23*p2x/self.mu312-self.mu23*p1x/self.m2
+        p23_y = self.mu23*p2y/self.mu312-self.mu23*p1y/self.m2
+        p23_z = self.mu23*p2z/self.mu312-self.mu23*p1z/self.m2
+        p31_x = self.mu31*p2x/self.mu312+self.mu31*p1x/self.m1
+        p31_y = self.mu31*p2y/self.mu312+self.mu31*p1y/self.m1
+        p31_z = self.mu31*p2z/self.mu312+self.mu31*p1z/self.m1
+
+        # Realtive momenta
+        p12 = np.sqrt(p1x**2+p1y**2+p1z**2)
+        p23 = np.sqrt(p23_x**2 + p23_y**2 + p23_z**2)
+        p31 = np.sqrt(p31_x**2 + p31_y**2 + p31_z**2)
+
+        # Angular momentum components
+        j12_x = rho1y*p1z - rho1z*p1y
+        j12_y = rho1z*p1x - rho1x*p1z
+        j12_z = rho1x*p1y - rho1y*p1x
+
+        j23_x = r23_y*p23_z - r23_z*p23_y
+        j23_y = r23_z*p23_x - r23_x*p23_z
+        j23_z = r23_x*p23_y - r23_y*p23_x        
+
+        j31_x = r31_y*p31_z - r31_z*p31_y
+        j31_y = r31_z*p31_x - r31_x*p31_z
+        j31_z = r31_x*p31_y - r31_y*p31_x
+
+        # j_eff arrays
+        j12 = -0.5 + 0.5*np.sqrt(1 + 4*(j12_x**2 + j12_y**2 + j12_z**2))
+        j23 = -0.5 + 0.5*np.sqrt(1 + 4*(j23_x**2 + j23_y**2 + j23_z**2))
+        j31 = -0.5 + 0.5*np.sqrt(1 + 4*(j31_x**2 + j31_y**2 + j31_z**2))
         
-        # Determine final states based on dissociation channels
-        final_states = self.determine_final_states(r12[-1], r23[-1], r31[-1])
+        # Set j values
+        self.mol_12.set_jPrime(np.round(j12)[-1])
+        self.mol_23.set_jPrime(np.round(j23)[-1])
+        self.mol_31.set_jPrime(np.round(j31)[-1])
+
+        # Calculate internal energies (evib + erot)
+        E12 = p12**2/2/self.mu12 + self.mol_12.Vij(r12) 
+        E23 = p23**2/2/self.mu23 + self.mol_23.Vij(r23)
+        E31 = p31**2/2/self.mu31 + self.mol_31.Vij(r31)
+
+        # Set E attributes
+        self.mol_12.set_E(E12[-1])
+        self.mol_23.set_E(E23[-1])
+        self.mol_31.set_E(E31[-1])
         
-        # Assign final states to appropriate channels
-        for channel, state in final_states.items():
-            if state['bound']:
-                self.count[channel] += 1
-                self.fstate['channels'][channel] = state
+        # Set bound states
+        self.mol_12.rebound()
+        self.mol_23.rebound()
+        self.mol_31.rebound()
+        
+        # Check if Eij < bound
+        try:
+            if self.mol_12.checkBound(r12[-1]):
+                # Check for complex formation
+                if not ((self.mol_23.checkBound(r23[-1])) or (self.mol_31.checkBound(r31[-1]))):
+                    # If bound, set turning points and vprime
+                    self.mol_12.turningPts(initial=False)
+                    self.mol_12.gaussBin(j12[-1]) # Assign gaussian weight to (v,j)
+                    self.count[0]+=1 # n12 
+                    self.set_fstate((self.mol_12.vt,self.mol_12.vw,
+                                self.mol_12.jPrime, self.mol_12.jw))
+                else:
+                    self.count[4]+=1 # complex
+            elif self.mol_23.checkBound(r23[-1]):
+                if not ((self.mol_31.checkBound(r31[-1])) or (self.mol_12.checkBound(r12[-1]))):
+                    self.mol_23.turningPts(initial=False)
+                    self.mol_23.gaussBin(j23[-1])
+                    self.count[1]+=1 # n23
+                    self.set_fstate((self.mol_23.vt,self.mol_23.vw,
+                                self.mol_23.jPrime, self.mol_23.jw))
+                else:
+                    self.count[4]+=1 # complex
+            elif self.mol_31.checkBound(r31[-1]):
+                if not ((self.mol_12.checkBound(r12[-1])) or (self.mol_23.checkBound(r23[-1]))):
+                    self.mol_31.turningPts(initial=False)
+                    self.mol_31.gaussBin(j31[-1])
+                    self.count[2]+=1 # n31
+                    self.set_fstate((self.mol_31.vt,self.mol_31.vw,
+                                self.mol_31.jPrime, self.mol_31.jw))
+                else:
+                    self.count[4]+=1 # complex
             else:
-                self.count['dissociation'] += 1
-        
-        logging.info(f"Trajectory completed: Counts={self.count}")
-    
-    def determine_final_states(self, r12, r23, r31):
-        '''
-        Determine the final states of the trajectory based on final internuclear distances.
-
-        Parameters:
-        - r12, r23, r31: Final internuclear distances.
-
-        Returns:
-        - final_states: Dictionary with channel names as keys and state information as values.
-        '''
-        final_states = {}
-        for channel in self.dissociation_channels:
-            if channel == 'SO+':
-                # Define criteria for SO+ + O formation
-                # Example criteria: r12 < equilibrium_SO and r23 > cutoff
-                bound = (r12 < self.mol_12.xmin + 0.5) and (r23 > self.mol_23.xmin + 0.5)
-                final_states[channel] = {
-                    'bound': bound,
-                    'v': self.get_final_vibrational_state(channel),
-                    'vw': 0.0,  # Assign weights as needed
-                    'j': self.get_final_rotational_state(channel),
-                    'jw': 0.0
-                }
-            elif channel == 'O':
-                # Define criteria for free Oxygen
-                bound = r23 > self.mol_23.xmin + 0.5
-                final_states[channel] = {
-                    'bound': not bound,  # Free if not bound
-                    'v': None,
-                    'vw': 0.0,
-                    'j': None,
-                    'jw': 0.0
-                }
-            # Add more channels as needed
-        return final_states
-    
-    def get_final_vibrational_state(self, channel):
-        '''
-        Placeholder function to determine the final vibrational state.
-        Implement based on your criteria or external data.
-        '''
-        return None
-    
-    def get_final_rotational_state(self, channel):
-        '''
-        Placeholder function to determine the final rotational state.
-        Implement based on your criteria or external data.
-        '''
-        return None
+                self.count[3]+=1 # dissociation
+        except:
+            self.rejected = 1
 def runOneT(*args, output=False, **kwargs):
     '''
     Runs one trajectory. Use this method as input into loop.

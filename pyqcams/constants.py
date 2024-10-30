@@ -6,7 +6,7 @@ J2Har = 2.2937122783963e17
 Har2invcm = 2.194746313632e5
 ttos = 2.4188843265857e-17
 autocm = 5.2918e-9
-
+Har2ev = 27.2114
 
 # Masses in atomic units (assuming 1 a.u. = mass of electron)
 mass_S = 32.065 * u2me  # Sulfur mass
