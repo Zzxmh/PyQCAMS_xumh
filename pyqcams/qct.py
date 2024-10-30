@@ -7,30 +7,24 @@ import os, time
 import matplotlib.pyplot as plt
 from pyqcams import util, constants, analysis
 import warnings
-# from joblib import Parallel, delayed
 import multiprocess as mp
 import torch
-from potentials import morse, load_MLP_model, load_scaler, mlp_potential_function, mlp_derivative_function_numba
-from util import hamiltonian, jac2cart, get_results
+from potentials import morse, load_MLP_model, mlp_potential_function, mlp_derivative_function_numba
 import logging
 # Paths
-model_path = 'models/so2_plus_mlp.pth'
-scaler_path = 'models/scaler.joblib'
 
-# Load scaler
-scaler = load_scaler(scaler_path)
-
-# Load model
-model = load_MLP_model(model_path, input_dim=3, neuron=50)
+model_path = r'E:\tasks\documents_in_pku\research\Roaming_NN\QCAT\NN\results\best_model.pth'
+# Load model (which includes scaler parameters)
+model = load_MLP_model(model_path, input_dim=3, neuron=64,process_param_l = 1.5).to(torch.device("cuda:0" if torch.cuda.is_available() else "cpu"))
 
 # Create potential functions
-V_MLP = mlp_potential_function(model, scaler)
+V_MLP = mlp_potential_function(model)
 dV_MLP = mlp_derivative_function_numba(V_MLP)
 class Molecule:
     '''
     Represents a molecule with its physical properties and interaction potentials.
     '''
-    def __init__(self, potential_type='analytical', potential_params=None, **kwargs):
+    def __init__(self, potential_type='analytical', potential_params=None, model=None, **kwargs):
         self.mi = kwargs.get('mi')  # Mass of atom i (atomic units)
         self.mj = kwargs.get('mj')  # Mass of atom j (atomic units)
         self.mu = self.mi * self.mj / (self.mi + self.mj)  # Reduced mass
@@ -44,7 +38,7 @@ class Molecule:
         # Initialize potential
         self.potential_type = potential_type
         self.potential_params = potential_params
-        self.Vij, self.dVij = self.initialize_potential()
+        self.Vij, self.dVij = self.initialize_potential(model)
         
         # Effective potential including rotational term
         self.Veff = lambda x: self.Vij(x) + self.ji * (self.ji + 1) / (2 * self.mu * x**2)
@@ -61,7 +55,7 @@ class Molecule:
         self.vPrime = None
         self.jPrime = None
     
-    def initialize_potential(self):
+    def initialize_potential(self, model=None):
         '''
         Initialize the potential based on the specified type.
         Supports analytical potentials and Machine Learning Potentials (MLP).
@@ -71,16 +65,14 @@ class Molecule:
             V, dV = morse(**self.potential_params) if self.potential_params else morse()
             return V, dV
         elif self.potential_type == 'MLP':
-            # Load scaler and model
-            scaler_path = self.potential_params.get('scaler_path')
-            model_path = self.potential_params.get('model_path')
-            scaler = load_scaler(scaler_path)
-            model = load_MLP_model(model_path, input_dim=self.potential_params.get('input_dim', 3), neuron=self.potential_params.get('neuron', 50))
-            V_MLP = mlp_potential_function(model, scaler)
+            if model is None:
+                raise ValueError("Model must be provided for MLP potential.")
+            V_MLP = mlp_potential_function(model)
             dV_MLP = mlp_derivative_function_numba(V_MLP)
             return V_MLP, dV_MLP
         else:
             raise ValueError(f"Unsupported potential type: {self.potential_type}")
+    
 
     def __repr__(self):
         return (f'{self.__class__.__name__}('
@@ -383,7 +375,7 @@ class Trajectory:
             # Compute distances
             r12 = np.linalg.norm(r1 - r2)
             
-            # Compute forces
+            # Compute forces using potentials
             F12 = -self.mu12 * self.v1(r12)  # Assuming v1 is potential energy, derivative gives force
             # Similarly, compute other forces if necessary
             
@@ -411,7 +403,7 @@ class Trajectory:
         self.t = sol.t
         
         # Compute Hamiltonian properties
-        etot, epot, ekin, ll = hamiltonian(self)
+        etot, epot, ekin, ll = util.hamiltonian(self)
         self.etot = etot
         self.epot = epot
         self.ekin = ekin
@@ -426,7 +418,7 @@ class Trajectory:
             return
         
         # Convert Jacobi to Cartesian
-        r12, r23, r31 = jac2cart(self.wn[:6], self.C1, self.C2)
+        r12, r23, r31 = util.jac2cart(self.wn[:6], self.C1, self.C2)
         
         # Determine final states based on dissociation channels
         final_states = self.determine_final_states(r12[-1], r23[-1], r31[-1])
@@ -444,10 +436,10 @@ class Trajectory:
     def determine_final_states(self, r12, r23, r31):
         '''
         Determine the final states of the trajectory based on final internuclear distances.
-        
+
         Parameters:
         - r12, r23, r31: Final internuclear distances.
-        
+
         Returns:
         - final_states: Dictionary with channel names as keys and state information as values.
         '''
@@ -490,7 +482,7 @@ class Trajectory:
         Implement based on your criteria or external data.
         '''
         return None
-def runOneT(*args,output=False,**kwargs):
+def runOneT(*args, output=False, **kwargs):
     '''
     Runs one trajectory. Use this method as input into loop.
     '''
@@ -498,77 +490,84 @@ def runOneT(*args,output=False,**kwargs):
     try:
         traj = Trajectory(**input_dict)
         traj.runT()
-        res = util.get_results(traj,*args)
+        res = util.get_results(traj, *args)
         if output:
-            out = {k:[v] for k,v in res.items()} # turn scalar to list
+            out = {k: [v] for k, v in res.items()}  # Turn scalar to list
             out = pd.DataFrame(out)
-            out.to_csv(output,mode = 'a', index = False,
-                    header = os.path.isfile(output) == False or os.path.getsize(output) == 0)
+            out.to_csv(output, mode='a', index=False,
+                       header=os.path.isfile(output) == False or os.path.getsize(output) == 0)
         return res
     except Exception as e:
         print(e)
         pass
     return
 
-def runN(nTraj, input_dict, cpus = os.cpu_count(), attrs = None,
-        short_out = None, long_out = None):
+def runN(nTraj, input_dict, cpus=os.cpu_count(), attrs=None,
+         short_out=None, long_out=None):
     t0 = time.time()
     result = []
     with mp.Pool(processes=cpus) as p:
         if attrs:
-            event = [p.apply_async(runOneT, args = (*attrs,),kwds=({'output':long_out,'input_dict':input_dict})) for i in range(nTraj)]
+            event = [p.apply_async(runOneT, args=(*attrs,), kwds={'output': long_out, 'input_dict': input_dict}) for i in range(nTraj)]
         else:
-            event = [p.apply_async(runOneT,kwds=({'output':long_out,'input_dict':input_dict})) for i in range(nTraj)]
+            event = [p.apply_async(runOneT, kwds={'output': long_out, 'input_dict': input_dict}) for i in range(nTraj)]
         for res in event:
             result.append(res.get())
     result = [i for i in result if i is not None]
     full = pd.DataFrame(result)
-    cols = ['vi','ji','e','b','n12','n23','n31','nd','nc']
-    counts = full.loc[:,cols].groupby(['vi','ji','e','b']).sum() # sum counts
+    cols = ['vi', 'ji', 'e', 'b', 'n12', 'n23', 'n31', 'nd', 'nc']
+    counts = full.loc[:, cols].groupby(['vi', 'ji', 'e', 'b']).sum()  # Sum counts
     counts['time'] = time.time() - t0
     # Short output
     if short_out:
-        counts.to_csv(short_out, mode = 'a',
-                    header = os.path.isfile(short_out) == False or os.path.getsize(short_out) == 0)
+        counts.to_csv(short_out, mode='a',
+                     header=os.path.isfile(short_out) == False or os.path.getsize(short_out) == 0)
     
     return full, counts
 
 if __name__ == '__main__':
     from potentials import *
     from constants import *
-    m1 = 1.008*constants.u2me
-    m2 = 1.008*constants.u2me
-    m3 = 40.078*constants.u2me
+    m1 = 1.008 * constants.u2me
+    m2 = 1.008 * constants.u2me
+    m3 = 40.078 * constants.u2me
 
-    E0 = 40000 # collision energy (K)
+    E0 = 40000  # Collision energy (K)
     b0 = 0
-    R0 = 50 # Bohr
+    R0 = 50  # Bohr
 
     # Potential parameters in atomic units
-    v12, dv12 = morse(de = 0.16456603489, re = 1.40104284795, alpha = 1.059493476908482)
-    v23, dv23 = morse(de = 0.06529228457, re = 3.79079033313, alpha = 0.6906412379896358)
-    v31, dv31 = morse(de = 0.06529228457, re = 3.79079033313, alpha = 0.6906412379896358)
+    v12, dv12 = morse(de=0.16456603489, re=1.40104284795, alpha=1.059493476908482)
+    v23, dv23 = morse(de=0.06529228457, re=3.79079033313, alpha=0.6906412379896358)
+    v31, dv31 = morse(de=0.06529228457, re=3.79079033313, alpha=0.6906412379896358)
 
     v123, dv123dr12, dv123dr23, dv123dr31 = axilrod(C=0)
 
     # Define molecule dictionaries
-    mol_12 = {'mi': m1, 'mj': m2, 'vi': 1, 'ji': 10, 'Vij':v12, 'dVij':dv12, 'xmin': .5, 'xmax': 30, 
-        'npts':1000}
+    mol_12 = {'mi': m1, 'mj': m2, 'vi': 1, 'ji': 10, 'Vij': v12, 'dVij': dv12, 
+              'xmin': 0.5, 'xmax': 30, 'npts': 1000}
     mol_23 = {'mi': m2, 'mj': m3, 'Vij': v23, 'dVij': dv23, 'xmin': 1, 'xmax': 40}
     mol_31 = {'mi': m3, 'mj': m1, 'Vij': v31, 'dVij': dv31, 'xmin': 1, 'xmax': 40}
 
-    # Initiate molecules
-    mol12 = Molecule(mi = m1, mj = m2, vi = 1, ji = 0,Vij = v12, dVij = dv12, 
-                        xmin = .5, xmax = 30, npts=1000)
-    mol23 = Molecule(mi = m2, mj = m3, Vij = v23, dVij = dv23, xmin = 1, xmax = 40)
-    mol31 = Molecule(mi = m3, mj = m1, Vij = v31, dVij = dv31, xmin = 1, xmax = 40)
+    # Initiate Molecules with MLP potential
+    mol12 = Molecule(
+        mi=m1, mj=m2, vi=1, ji=0, Vij=V_MLP, dVij=dV_MLP, 
+        xmin=0.5, xmax=30, npts=1000, potential_type='MLP'
+    )
+    mol23 = Molecule(
+        mi=m2, mj=m3, Vij=V_MLP, dVij=dV_MLP, xmin=1, xmax=40, potential_type='MLP'
+    )
+    mol31 = Molecule(
+        mi=m3, mj=m1, Vij=V_MLP, dVij=dV_MLP, xmin=1, xmax=40, potential_type='MLP'
+    )
 
-    input_dict = {'m1':m1,'m2':m2,'m3':m3,
-    'E0': E0, 'b0': b0, 'R0': R0, 'seed': None,
-    'mol_12': mol12,'mol_23': mol23,'mol_31': mol31,
-    'vt': v123, 'dvtdr12': dv123dr12, 'dvtdr23': dv123dr23, 'dvtdr31': dv123dr31,
-    'integ':{'t_stop': 2, 'r_stop': 2, 'r_tol': 1e-12, 'a_tol':1e-10,'econs':1e-5,'lcons':1e-5}}
-
+    input_dict = {
+        'm1': m1, 'm2': m2, 'm3': m3,
+        'E0': E0, 'b0': b0, 'R0': R0, 'seed': None,
+        'mol_12': mol12, 'mol_23': mol23, 'mol_31': mol31,
+        'vt': v123, 'dvtdr12': dv123dr12, 'dvtdr23': dv123dr23, 'dvtdr31': dv123dr31,
+        'integ': {'t_stop': 2, 'r_stop': 2, 'r_tol': 1e-12, 'a_tol':1e-10, 'econs':1e-5, 'lcons':1e-5}
+    }
 
     ################################################
     import plotters
@@ -580,46 +579,3 @@ if __name__ == '__main__':
     print(util.get_results(traj))
     plotters.traj_plt(traj)
     plt.show()
-    # for b in bi:
-    #     print(f'Running b={b}')
-    #     input_dict['seed']=b
-    #     runOneT(input_dict=input_dict)
-    # traj = Trajectory(**input_dict)
-    # traj.runT()
-    # plotters.traj_plt(traj)
-    # plt.show()
-    # print(traj.mol_23.__dict__)
-    # runN(30, input_dict, short_out='tryshort.txt', long_out='trylong.txt')
-    # input_dict['seed'] = 63
-    # traj = QCT(**input_dict)
-    # traj.runT()
-    # print(traj.delta_e)
-    # plotters.traj_plt(traj)
-    # plt.title(traj.count)
-    # plt.show()
-    # input_dict['E0'] = 40000
-    # t0 = time.time()
-    # nTraj = 20
-    # runN(nTraj,input_dict, attrs=('delta_e',),long_out='long_test.txt', opacity='opac_test.txt', vib=False,rot=False)
-    # print(f'Time: {time.time()-t0}')
-    # n_jobs = 8
-    # attrs = ('delta_e',)
-    # r = Parallel(n_jobs=n_jobs)(delayed(runOneT)(*attrs,**input_dict) for i in range(nTraj))
-    # df = pd.DataFrame(r)
-    # print(df)
-    # analysis.opacity(df,GB = False, vib = True, rot = False, output = 'opacity_test.txt', mode = 'a')
-    ######## Test batch of trajectories ##########
-    # from pyqcams2 import plotters
-    # fig, axs = plt.subplots(2,5)
-    # axs = axs.ravel()
-    # for i in np.arange(0,10):    
-    #     print(i)
-    #     traj = Trajectory(**input_dict)
-    #     try:
-    #         traj.runT()
-    #         plotters.traj_plt(traj, ax = axs[i])
-    #         axs[i].set_title(f'{i}:{traj.count}')
-    #     except Exception as e:
-    #         print(e)
-    #         pass
-    # plt.show()
