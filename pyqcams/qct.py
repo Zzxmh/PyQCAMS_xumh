@@ -9,17 +9,13 @@ from pyqcams import util, constants, analysis
 import warnings
 import multiprocess as mp
 import torch
-from potentials import morse, load_MLP_model, mlp_potential_function, mlp_derivative_function_numba
+from potentials import morse, load_MLP_model, mlp_potential_function
 import logging
 # Paths
 
 model_path = r'E:\tasks\documents_in_pku\research\Roaming_NN\QCAT\NN\results\best_model.pth'
 # Load model (which includes scaler parameters)
 model = load_MLP_model(model_path, input_dim=3, neuron=64,process_param_l = 1.5).to(torch.device("cuda:0" if torch.cuda.is_available() else "cpu"))
-
-# Create potential functions
-V_MLP = mlp_potential_function(model)
-dV_MLP = mlp_derivative_function_numba(V_MLP)
 class Molecule:
     '''
     Represents a molecule with its physical properties and interaction potentials.
@@ -38,8 +34,9 @@ class Molecule:
         # Initialize potential
         self.potential_type = potential_type
         self.potential_params = potential_params
-        self.Vij, self.dVij = self.initialize_potential(model)
-        
+        self.Vij, self.dVij = kwargs.get('Vij'), kwargs.get('dVij')
+        if self.Vij is None or self.dVij is None:
+            self.Vij, self.dVij = self.initialize_potential(model)
         # Effective potential including rotational term
         self.Veff = lambda x: self.Vij(x) + self.ji * (self.ji + 1) / (2 * self.mu * x**2)
     
@@ -55,8 +52,8 @@ class Molecule:
         elif self.potential_type == 'MLP':
             if model is None:
                 raise ValueError("Model must be provided for MLP potential.")
-            V_MLP,dV_MLP = mlp_potential_function(model)
-            return V_MLP, dV_MLP
+            V_MLP, dVdr12, dVdr23, dVdr31 = mlp_potential_function(model)
+            return V_MLP, dVdr12, dVdr23, dVdr31
         else:
             raise ValueError(f"Unsupported potential type: {self.potential_type}")
     
@@ -411,188 +408,196 @@ class Trajectory:
         dv12 = self.mol_12.dVij
         dv23 = self.mol_23.dVij
         dv31 = self.mol_31.dVij
+    # Compute derivatives of the two-body potentials
+        dv12_value = dv12(r12)
+        dv23_value = dv23(r23)
+        dv31_value = dv31(r31)
 
+        # Three-body potential derivatives
+        dvtdr12_value = self.dvtdr12(r12, r23, r31)
+        dvtdr23_value = self.dvtdr23(r12, r23, r31)
+        dvtdr31_value = self.dvtdr31(r12, r23, r31)
         # Hamilton's equations (pdot)
-        dP1x = - (dv12(r12)*r12drho1x + dv23(r23)*r23drho1x + dv31(r31)*r31drho1x
-                + self.dvtdr12(r12,r23,r31)*r12drho1x + self.dvtdr23(r12,r23,r31)*r23drho1x + self.dvtdr31(r12,r23,r31)*r31drho1x)
-        dP1y = - (dv12(r12)*r12drho1y + dv23(r23)*r23drho1y + dv31(r31)*r31drho1y
-                + self.dvtdr12(r12,r23,r31)*r12drho1y + self.dvtdr23(r12,r23,r31)*r23drho1y + self.dvtdr31(r12,r23,r31)*r31drho1y)
-        dP1z = - (dv12(r12)*r12drho1z + dv23(r23)*r23drho1z + dv31(r31)*r31drho1z
-                + self.dvtdr12(r12,r23,r31)*r12drho1z + self.dvtdr23(r12,r23,r31)*r23drho1z + self.dvtdr31(r12,r23,r31)*r31drho1z)
-        dP2x = - (dv23(r23)*r23drho2x + dv31(r31)*r31drho2x
-                + self.dvtdr23(r12,r23,r31)*r23drho2x + self.dvtdr31(r12,r23,r31)*r31drho2x)
-        dP2y = - (dv23(r23)*r23drho2y + dv31(r31)*r31drho2y
-                + self.dvtdr23(r12,r23,r31)*r23drho2y + self.dvtdr31(r12,r23,r31)*r31drho2y)
-        dP2z = - (dv23(r23)*r23drho2z + dv31(r31)*r31drho2z
-                + self.dvtdr23(r12,r23,r31)*r23drho2z + self.dvtdr31(r12,r23,r31)*r31drho2z)
-        
+        # Hamilton's equations (pdot)
+        dP1x = - (dv12_value * r12drho1x + dv23_value * r23drho1x + dv31_value * r31drho1x
+                + dvtdr12_value * r12drho1x + dvtdr23_value * r23drho1x + dvtdr31_value * r31drho1x)
+        dP1y = - (dv12_value * r12drho1y + dv23_value * r23drho1y + dv31_value * r31drho1y
+                + dvtdr12_value * r12drho1y + dvtdr23_value * r23drho1y + dvtdr31_value * r31drho1y)
+        dP1z = - (dv12_value * r12drho1z + dv23_value * r23drho1z + dv31_value * r31drho1z
+                + dvtdr12_value * r12drho1z + dvtdr23_value * r23drho1z + dvtdr31_value * r31drho1z)
+        dP2x = - (dv23_value * r23drho2x + dv31_value * r31drho2x
+                + dvtdr23_value * r23drho2x + dvtdr31_value * r31drho2x)
+        dP2y = - (dv23_value * r23drho2y + dv31_value * r31drho2y
+                + dvtdr23_value * r23drho2y + dvtdr31_value * r31drho2y)
+        dP2z = - (dv23_value * r23drho2z + dv31_value * r31drho2z
+                + dvtdr23_value * r23drho2z + dvtdr31_value * r31drho2z)
         # Hamilton's equations
         f = [drho1x, drho1y, drho1z, drho2x, drho2y, drho2z, 
              dP1x, dP1y, dP1z, dP2x, dP2y, dP2z]
         return f
 
-def runT(self):
-        '''
-        Run one trajectory.
+    def runT(self):
+            '''
+            Run one trajectory.
 
-        '''
+            '''
+            
+            # Start fstate at 0
+            self.set_fstate((0,0,0,0)) #v,vw,j,jw
+            self.rejected = 0 # Keep track if trajectory fails
+            self.count = [0,0,0,0,0] # n12,n23,n31,nd,nc
+            self.iCond()
+            self.vi = self.mol_12.get_vi()
+
+
+            def stop1(t,w):
+                '''Stop integration when r12 > "far" AU'''
+                rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w
+                r12 = np.sqrt(rho1x**2+rho1y**2+rho1z**2)
+
+                return r12 - self.R*self.r_stop
+
+            def stop2(t,w):
+                '''Stop integration when r32 > "far" AU'''
+                rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w
+                r23 = np.sqrt((rho2x - self.C1*rho1x)**2
+                            + (rho2y - self.C1*rho1y)**2 
+                            + (rho2z - self.C1*rho1z)**2)
+                return r23 - self.R*self.r_stop
+            
+            def stop3(t,w):
+                '''Stop integration when r31 > "far" AU'''
+                rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w 
+                r31 = np.sqrt((rho2x + self.C2*rho1x)**2
+                            + (rho2y + self.C2*rho1y)**2 
+                            + (rho2z + self.C2*rho1z)**2)
+                return r31 - self.R*self.r_stop
+
+            stop1.terminal = True
+            stop2.terminal = True
+            stop3.terminal = True
+
+            tscale = self.R/np.sqrt(2*self.E0/self.mu312)
+            wsol = solve_ivp(y0 = self.w0, fun = lambda t,y: self.hamEq(t,y),
+                            t_span = [0,tscale*self.t_stop], method = 'RK45',
+                            rtol = self.r_tol, atol = self.a_tol, events = (stop1,stop2,stop3))
+
+            self.wn = wsol.y
+            self.t = wsol.t
+            x = self.wn[:6] # rho1, rho2
+            En, Vn, Kn, Ln = util.hamiltonian(self)
         
-        # Start fstate at 0
-        self.set_fstate((0,0,0,0)) #v,vw,j,jw
-        self.rejected = 0 # Keep track if trajectory fails
-        self.count = [0,0,0,0,0] # n12,n23,n31,nd,nc
-        self.iCond()
-        self.vi = self.mol_12.get_vi()
+            self.delta_e = En[-1] - En[0] # Energy conservation
+            self.delta_l = Ln[-1] - Ln[0] # Momentum conservation
+            if self.delta_e > self.econs:
+                print(f'Energy not conserved less than {self.econs}.')
+                self.rejected+=1
+                return
+            if self.delta_l > self.lcons:
+                print(f'Momentum not conserved less than {self.lcons}.')
+                self.rejected+=1
+                return
+            
+            r12,r23,r31 = util.jac2cart(x, self.C1, self.C2)
 
+            # Recover vectors
+            rho1x, rho1y, rho1z, rho2x, \
+            rho2y, rho2z, p1x, p1y, p1z, \
+            p2x, p2y, p2z = wsol.y
 
-        def stop1(t,w):
-            '''Stop integration when r12 > "far" AU'''
-            rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w
-            r12 = np.sqrt(rho1x**2+rho1y**2+rho1z**2)
+            # Components
+            r23_x = rho2x - self.C1*rho1x
+            r23_y = rho2y - self.C1*rho1y
+            r23_z = rho2z - self.C1*rho1z
+            r31_x = rho2x + self.C2*rho1x
+            r31_y = rho2y + self.C2*rho1y
+            r31_z = rho2z + self.C2*rho1z
 
-            return r12 - self.R*self.r_stop
+            p23_x = self.mu23*p2x/self.mu312-self.mu23*p1x/self.m2
+            p23_y = self.mu23*p2y/self.mu312-self.mu23*p1y/self.m2
+            p23_z = self.mu23*p2z/self.mu312-self.mu23*p1z/self.m2
+            p31_x = self.mu31*p2x/self.mu312+self.mu31*p1x/self.m1
+            p31_y = self.mu31*p2y/self.mu312+self.mu31*p1y/self.m1
+            p31_z = self.mu31*p2z/self.mu312+self.mu31*p1z/self.m1
 
-        def stop2(t,w):
-            '''Stop integration when r32 > "far" AU'''
-            rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w
-            r23 = np.sqrt((rho2x - self.C1*rho1x)**2
-                        + (rho2y - self.C1*rho1y)**2 
-                        + (rho2z - self.C1*rho1z)**2)
-            return r23 - self.R*self.r_stop
-        
-        def stop3(t,w):
-            '''Stop integration when r31 > "far" AU'''
-            rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w 
-            r31 = np.sqrt((rho2x + self.C2*rho1x)**2
-                        + (rho2y + self.C2*rho1y)**2 
-                        + (rho2z + self.C2*rho1z)**2)
-            return r31 - self.R*self.r_stop
+            # Realtive momenta
+            p12 = np.sqrt(p1x**2+p1y**2+p1z**2)
+            p23 = np.sqrt(p23_x**2 + p23_y**2 + p23_z**2)
+            p31 = np.sqrt(p31_x**2 + p31_y**2 + p31_z**2)
 
-        stop1.terminal = True
-        stop2.terminal = True
-        stop3.terminal = True
+            # Angular momentum components
+            j12_x = rho1y*p1z - rho1z*p1y
+            j12_y = rho1z*p1x - rho1x*p1z
+            j12_z = rho1x*p1y - rho1y*p1x
 
-        tscale = self.R/np.sqrt(2*self.E0/self.mu312)
-        wsol = solve_ivp(y0 = self.w0, fun = lambda t,y: self.hamEq(t,y),
-                         t_span = [0,tscale*self.t_stop], method = 'RK45',
-                         rtol = self.r_tol, atol = self.a_tol, events = (stop1,stop2,stop3))
+            j23_x = r23_y*p23_z - r23_z*p23_y
+            j23_y = r23_z*p23_x - r23_x*p23_z
+            j23_z = r23_x*p23_y - r23_y*p23_x        
 
-        self.wn = wsol.y
-        self.t = wsol.t
-        x = self.wn[:6] # rho1, rho2
-        En, Vn, Kn, Ln = util.hamiltonian(self)
-       
-        self.delta_e = En[-1] - En[0] # Energy conservation
-        self.delta_l = Ln[-1] - Ln[0] # Momentum conservation
-        if self.delta_e > self.econs:
-            print(f'Energy not conserved less than {self.econs}.')
-            self.rejected+=1
-            return
-        if self.delta_l > self.lcons:
-            print(f'Momentum not conserved less than {self.lcons}.')
-            self.rejected+=1
-            return
-        
-        r12,r23,r31 = util.jac2cart(x, self.C1, self.C2)
+            j31_x = r31_y*p31_z - r31_z*p31_y
+            j31_y = r31_z*p31_x - r31_x*p31_z
+            j31_z = r31_x*p31_y - r31_y*p31_x
 
-        # Recover vectors
-        rho1x, rho1y, rho1z, rho2x, \
-        rho2y, rho2z, p1x, p1y, p1z, \
-        p2x, p2y, p2z = wsol.y
+            # j_eff arrays
+            j12 = -0.5 + 0.5*np.sqrt(1 + 4*(j12_x**2 + j12_y**2 + j12_z**2))
+            j23 = -0.5 + 0.5*np.sqrt(1 + 4*(j23_x**2 + j23_y**2 + j23_z**2))
+            j31 = -0.5 + 0.5*np.sqrt(1 + 4*(j31_x**2 + j31_y**2 + j31_z**2))
+            
+            # Set j values
+            self.mol_12.set_jPrime(np.round(j12)[-1])
+            self.mol_23.set_jPrime(np.round(j23)[-1])
+            self.mol_31.set_jPrime(np.round(j31)[-1])
 
-        # Components
-        r23_x = rho2x - self.C1*rho1x
-        r23_y = rho2y - self.C1*rho1y
-        r23_z = rho2z - self.C1*rho1z
-        r31_x = rho2x + self.C2*rho1x
-        r31_y = rho2y + self.C2*rho1y
-        r31_z = rho2z + self.C2*rho1z
+            # Calculate internal energies (evib + erot)
+            E12 = p12**2/2/self.mu12 + self.mol_12.Vij(r12) 
+            E23 = p23**2/2/self.mu23 + self.mol_23.Vij(r23)
+            E31 = p31**2/2/self.mu31 + self.mol_31.Vij(r31)
 
-        p23_x = self.mu23*p2x/self.mu312-self.mu23*p1x/self.m2
-        p23_y = self.mu23*p2y/self.mu312-self.mu23*p1y/self.m2
-        p23_z = self.mu23*p2z/self.mu312-self.mu23*p1z/self.m2
-        p31_x = self.mu31*p2x/self.mu312+self.mu31*p1x/self.m1
-        p31_y = self.mu31*p2y/self.mu312+self.mu31*p1y/self.m1
-        p31_z = self.mu31*p2z/self.mu312+self.mu31*p1z/self.m1
-
-        # Realtive momenta
-        p12 = np.sqrt(p1x**2+p1y**2+p1z**2)
-        p23 = np.sqrt(p23_x**2 + p23_y**2 + p23_z**2)
-        p31 = np.sqrt(p31_x**2 + p31_y**2 + p31_z**2)
-
-        # Angular momentum components
-        j12_x = rho1y*p1z - rho1z*p1y
-        j12_y = rho1z*p1x - rho1x*p1z
-        j12_z = rho1x*p1y - rho1y*p1x
-
-        j23_x = r23_y*p23_z - r23_z*p23_y
-        j23_y = r23_z*p23_x - r23_x*p23_z
-        j23_z = r23_x*p23_y - r23_y*p23_x        
-
-        j31_x = r31_y*p31_z - r31_z*p31_y
-        j31_y = r31_z*p31_x - r31_x*p31_z
-        j31_z = r31_x*p31_y - r31_y*p31_x
-
-        # j_eff arrays
-        j12 = -0.5 + 0.5*np.sqrt(1 + 4*(j12_x**2 + j12_y**2 + j12_z**2))
-        j23 = -0.5 + 0.5*np.sqrt(1 + 4*(j23_x**2 + j23_y**2 + j23_z**2))
-        j31 = -0.5 + 0.5*np.sqrt(1 + 4*(j31_x**2 + j31_y**2 + j31_z**2))
-        
-        # Set j values
-        self.mol_12.set_jPrime(np.round(j12)[-1])
-        self.mol_23.set_jPrime(np.round(j23)[-1])
-        self.mol_31.set_jPrime(np.round(j31)[-1])
-
-        # Calculate internal energies (evib + erot)
-        E12 = p12**2/2/self.mu12 + self.mol_12.Vij(r12) 
-        E23 = p23**2/2/self.mu23 + self.mol_23.Vij(r23)
-        E31 = p31**2/2/self.mu31 + self.mol_31.Vij(r31)
-
-        # Set E attributes
-        self.mol_12.set_E(E12[-1])
-        self.mol_23.set_E(E23[-1])
-        self.mol_31.set_E(E31[-1])
-        
-        # Set bound states
-        self.mol_12.rebound()
-        self.mol_23.rebound()
-        self.mol_31.rebound()
-        
-        # Check if Eij < bound
-        try:
-            if self.mol_12.checkBound(r12[-1]):
-                # Check for complex formation
-                if not ((self.mol_23.checkBound(r23[-1])) or (self.mol_31.checkBound(r31[-1]))):
-                    # If bound, set turning points and vprime
-                    self.mol_12.turningPts(initial=False)
-                    self.mol_12.gaussBin(j12[-1]) # Assign gaussian weight to (v,j)
-                    self.count[0]+=1 # n12 
-                    self.set_fstate((self.mol_12.vt,self.mol_12.vw,
-                                self.mol_12.jPrime, self.mol_12.jw))
+            # Set E attributes
+            self.mol_12.set_E(E12[-1])
+            self.mol_23.set_E(E23[-1])
+            self.mol_31.set_E(E31[-1])
+            
+            # Set bound states
+            self.mol_12.rebound()
+            self.mol_23.rebound()
+            self.mol_31.rebound()
+            
+            # Check if Eij < bound
+            try:
+                if self.mol_12.checkBound(r12[-1]):
+                    # Check for complex formation
+                    if not ((self.mol_23.checkBound(r23[-1])) or (self.mol_31.checkBound(r31[-1]))):
+                        # If bound, set turning points and vprime
+                        self.mol_12.turningPts(initial=False)
+                        self.mol_12.gaussBin(j12[-1]) # Assign gaussian weight to (v,j)
+                        self.count[0]+=1 # n12 
+                        self.set_fstate((self.mol_12.vt,self.mol_12.vw,
+                                    self.mol_12.jPrime, self.mol_12.jw))
+                    else:
+                        self.count[4]+=1 # complex
+                elif self.mol_23.checkBound(r23[-1]):
+                    if not ((self.mol_31.checkBound(r31[-1])) or (self.mol_12.checkBound(r12[-1]))):
+                        self.mol_23.turningPts(initial=False)
+                        self.mol_23.gaussBin(j23[-1])
+                        self.count[1]+=1 # n23
+                        self.set_fstate((self.mol_23.vt,self.mol_23.vw,
+                                    self.mol_23.jPrime, self.mol_23.jw))
+                    else:
+                        self.count[4]+=1 # complex
+                elif self.mol_31.checkBound(r31[-1]):
+                    if not ((self.mol_12.checkBound(r12[-1])) or (self.mol_23.checkBound(r23[-1]))):
+                        self.mol_31.turningPts(initial=False)
+                        self.mol_31.gaussBin(j31[-1])
+                        self.count[2]+=1 # n31
+                        self.set_fstate((self.mol_31.vt,self.mol_31.vw,
+                                    self.mol_31.jPrime, self.mol_31.jw))
+                    else:
+                        self.count[4]+=1 # complex
                 else:
-                    self.count[4]+=1 # complex
-            elif self.mol_23.checkBound(r23[-1]):
-                if not ((self.mol_31.checkBound(r31[-1])) or (self.mol_12.checkBound(r12[-1]))):
-                    self.mol_23.turningPts(initial=False)
-                    self.mol_23.gaussBin(j23[-1])
-                    self.count[1]+=1 # n23
-                    self.set_fstate((self.mol_23.vt,self.mol_23.vw,
-                                self.mol_23.jPrime, self.mol_23.jw))
-                else:
-                    self.count[4]+=1 # complex
-            elif self.mol_31.checkBound(r31[-1]):
-                if not ((self.mol_12.checkBound(r12[-1])) or (self.mol_23.checkBound(r23[-1]))):
-                    self.mol_31.turningPts(initial=False)
-                    self.mol_31.gaussBin(j31[-1])
-                    self.count[2]+=1 # n31
-                    self.set_fstate((self.mol_31.vt,self.mol_31.vw,
-                                self.mol_31.jPrime, self.mol_31.jw))
-                else:
-                    self.count[4]+=1 # complex
-            else:
-                self.count[3]+=1 # dissociation
-        except:
-            self.rejected = 1
+                    self.count[3]+=1 # dissociation
+            except:
+                self.rejected = 1
 def runOneT(*args, output=False, **kwargs):
     '''
     Runs one trajectory. Use this method as input into loop.

@@ -111,54 +111,61 @@ def load_MLP_model(model_path, input_dim, neuron, process_param_l):
 
 def mlp_potential_function(model):
     '''
-    Create a potential energy function that computes both the potential energy and its partial derivatives with respect to r12, r23, and r31.
+    Create functions for potential energy and its partial derivatives with respect to r12, r23, and r31.
 
     Parameters:
     - model: nn.Module, loaded MLP model.
 
     Returns:
-    - V_MLP_with_derivatives: callable, function that takes r and returns potential energy and partial derivatives.
+    - V_MLP: callable, function that takes r12, r23, r31 and returns potential energy.
+    - dVdr12: callable, function that takes r12, r23, r31 and returns dV/dr12.
+    - dVdr23: callable, function that takes r12, r23, r31 and returns dV/dr23.
+    - dVdr31: callable, function that takes r12, r23, r31 and returns dV/dr31.
     '''
-    def V_MLP_with_derivatives(r):
-        '''
-        Compute potential energy and its partial derivatives using the MLP model.
-
-        Parameters:
-        - r: float or np.ndarray, bond lengths with shape (..., 3).
-
-        Returns:
-        - potential: np.ndarray, predicted potential energy.
-        - dVdr12: np.ndarray, partial derivative with respect to r12.
-        - dVdr23: np.ndarray, partial derivative with respect to r23.
-        - dVdr31: np.ndarray, partial derivative with respect to r31.
-        '''
-        # Ensure r is a numpy array with shape (N, 3)
-        r = np.atleast_2d(r).astype(np.float32)
-
-        # Convert to torch tensor and enable gradient computation
+    def V_MLP(r12, r23, r31):
+        # Check if inputs are scalars
+        if np.isscalar(r12) and np.isscalar(r23) and np.isscalar(r31):
+            r = np.array([[r12, r23, r31]], dtype=np.float32)
+        else:
+            # Combine inputs into array
+            r = np.vstack([r12, r23, r31]).T.astype(np.float32)
         inputs = torch.tensor(r, dtype=torch.float32, requires_grad=True)
-
-        # Forward pass
         outputs = model(inputs)
-
-        # Backward pass to compute gradients
-        # Since outputs may be batched, use torch.ones_like to compute gradients for each sample
-        outputs.backward(torch.ones_like(outputs))
-
-        # Get the gradients
-        grads = inputs.grad.detach().numpy()
-
-        # Get the potential energy
         potential = outputs.detach().numpy().flatten()
+        if potential.size == 1:
+            return potential[0]  # Return scalar
+        else:
+            return potential
 
-        # Extract partial derivatives
-        dVdr12 = grads[:, 0]
-        dVdr23 = grads[:, 1]
-        dVdr31 = grads[:, 2]
+    def compute_derivative(r12, r23, r31, index):
+        # Check if inputs are scalars
+        if np.isscalar(r12) and np.isscalar(r23) and np.isscalar(r31):
+            r = np.array([[r12, r23, r31]], dtype=np.float32)
+        else:
+            # Combine inputs into array
+            r = np.vstack([r12, r23, r31]).T.astype(np.float32)
+        inputs = torch.tensor(r, dtype=torch.float32, requires_grad=True)
+        outputs = model(inputs)
+        outputs.backward(torch.ones_like(outputs))
+        grads = inputs.grad.detach().numpy()
+        derivative = grads[:, index]
+        if derivative.size == 1:
+            return derivative[0]  # Return scalar
+        else:
+            return derivative
 
-        return potential, dVdr12, dVdr23, dVdr31
+    def dVdr12(r12, r23, r31):
+        return compute_derivative(r12, r23, r31, index=0)
 
-    return V_MLP_with_derivatives
+    def dVdr23(r12, r23, r31):
+        return compute_derivative(r12, r23, r31, index=1)
+
+    def dVdr31(r12, r23, r31):
+        return compute_derivative(r12, r23, r31, index=2)
+
+    return V_MLP, dVdr12, dVdr23, dVdr31
+
+
 
 # Two body potentials
 def morse(de=1., alpha=1., re=1.):
