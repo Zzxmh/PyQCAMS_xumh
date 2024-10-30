@@ -11,6 +11,10 @@ import multiprocess as mp
 import torch
 from potentials import morse, load_MLP_model, mlp_potential_function
 import logging
+from multiprocessing import Value
+import numpy as np
+import threading
+import tqdm
 # Paths
 
 model_path = r'E:\tasks\documents_in_pku\research\Roaming_NN\QCAT\NN\results\best_model.pth'
@@ -297,7 +301,8 @@ class Trajectory:
         self.mu312 = self.m3 * (self.m1 + self.m2) / self.mtot
         self.C1 = self.m1 / (self.m1 + self.m2)
         self.C2 = self.m2 / (self.m1 + self.m2)
-        
+        self.progress = Value('i', 0)  # 定义一个整型共享变量
+        self.total_steps = 1000  # 估计的总步数，可以根据需要调整
 
     def set_attrs(self):
         self.delta_e = [np.nan]
@@ -377,6 +382,8 @@ class Trajectory:
 
         Requires DERIVATIVES of potential functions. 
         '''
+        with self.progress.get_lock():
+            self.progress.value += 1
         rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w
         r12, r23, r31 = util.jac2cart(w[:6], self.C1, self.C2)
 
@@ -434,170 +441,201 @@ class Trajectory:
         # Hamilton's equations
         f = [drho1x, drho1y, drho1z, drho2x, drho2y, drho2z, 
              dP1x, dP1y, dP1z, dP2x, dP2y, dP2z]
+
+
         return f
 
     def runT(self):
-            '''
-            Run one trajectory.
-
-            '''
-            
-            # Start fstate at 0
-            self.set_fstate((0,0,0,0)) #v,vw,j,jw
-            self.rejected = 0 # Keep track if trajectory fails
-            self.count = [0,0,0,0,0] # n12,n23,n31,nd,nc
-            self.iCond()
-            self.vi = self.mol_12.get_vi()
-
-
-            def stop1(t,w):
-                '''Stop integration when r12 > "far" AU'''
-                rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w
-                r12 = np.sqrt(rho1x**2+rho1y**2+rho1z**2)
-
-                return r12 - self.R*self.r_stop
-
-            def stop2(t,w):
-                '''Stop integration when r32 > "far" AU'''
-                rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w
-                r23 = np.sqrt((rho2x - self.C1*rho1x)**2
-                            + (rho2y - self.C1*rho1y)**2 
-                            + (rho2z - self.C1*rho1z)**2)
-                return r23 - self.R*self.r_stop
-            
-            def stop3(t,w):
-                '''Stop integration when r31 > "far" AU'''
-                rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w 
-                r31 = np.sqrt((rho2x + self.C2*rho1x)**2
-                            + (rho2y + self.C2*rho1y)**2 
-                            + (rho2z + self.C2*rho1z)**2)
-                return r31 - self.R*self.r_stop
-
-            stop1.terminal = True
-            stop2.terminal = True
-            stop3.terminal = True
-
-            tscale = self.R/np.sqrt(2*self.E0/self.mu312)
-            wsol = solve_ivp(y0 = self.w0, fun = lambda t,y: self.hamEq(t,y),
-                            t_span = [0,tscale*self.t_stop], method = 'RK45',
-                            rtol = self.r_tol, atol = self.a_tol, events = (stop1,stop2,stop3))
-
-            self.wn = wsol.y
-            self.t = wsol.t
-            x = self.wn[:6] # rho1, rho2
-            En, Vn, Kn, Ln = util.hamiltonian(self)
+        '''
+        Run one trajectory.
+        '''
         
-            self.delta_e = En[-1] - En[0] # Energy conservation
-            self.delta_l = Ln[-1] - Ln[0] # Momentum conservation
-            if self.delta_e > self.econs:
-                print(f'Energy not conserved less than {self.econs}.')
-                self.rejected+=1
-                return
-            if self.delta_l > self.lcons:
-                print(f'Momentum not conserved less than {self.lcons}.')
-                self.rejected+=1
-                return
-            
-            r12,r23,r31 = util.jac2cart(x, self.C1, self.C2)
+        # 初始化状态
+        self.set_fstate((0,0,0,0)) # v,vw,j,jw
+        self.rejected = 0 # 记录是否拒绝
+        self.count = [0,0,0,0,0] # n12,n23,n31,nd,nc
+        self.iCond()
+        self.vi = self.mol_12.get_vi()
 
-            # Recover vectors
-            rho1x, rho1y, rho1z, rho2x, \
-            rho2y, rho2z, p1x, p1y, p1z, \
-            p2x, p2y, p2z = wsol.y
+        logging.info("开始运行轨迹模拟...")
 
-            # Components
-            r23_x = rho2x - self.C1*rho1x
-            r23_y = rho2y - self.C1*rho1y
-            r23_z = rho2z - self.C1*rho1z
-            r31_x = rho2x + self.C2*rho1x
-            r31_y = rho2y + self.C2*rho1y
-            r31_z = rho2z + self.C2*rho1z
+        def stop1(t, w):
+            '''当 r12 > "far" AU 时停止积分'''
+            rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w
+            r12 = np.sqrt(rho1x**2 + rho1y**2 + rho1z**2)
+            return r12 - self.R * self.r_stop
 
-            p23_x = self.mu23*p2x/self.mu312-self.mu23*p1x/self.m2
-            p23_y = self.mu23*p2y/self.mu312-self.mu23*p1y/self.m2
-            p23_z = self.mu23*p2z/self.mu312-self.mu23*p1z/self.m2
-            p31_x = self.mu31*p2x/self.mu312+self.mu31*p1x/self.m1
-            p31_y = self.mu31*p2y/self.mu312+self.mu31*p1y/self.m1
-            p31_z = self.mu31*p2z/self.mu312+self.mu31*p1z/self.m1
+        def stop2(t, w):
+            '''当 r23 > "far" AU 时停止积分'''
+            rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w
+            r23 = np.sqrt((rho2x - self.C1 * rho1x)**2
+                         + (rho2y - self.C1 * rho1y)**2 
+                         + (rho2z - self.C1 * rho1z)**2)
+            return r23 - self.R * self.r_stop
 
-            # Realtive momenta
-            p12 = np.sqrt(p1x**2+p1y**2+p1z**2)
-            p23 = np.sqrt(p23_x**2 + p23_y**2 + p23_z**2)
-            p31 = np.sqrt(p31_x**2 + p31_y**2 + p31_z**2)
+        def stop3(t, w):
+            '''当 r31 > "far" AU 时停止积分'''
+            rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w 
+            r31 = np.sqrt((rho2x + self.C2 * rho1x)**2
+                         + (rho2y + self.C2 * rho1y)**2 
+                         + (rho2z + self.C2 * rho1z)**2)
+            return r31 - self.R * self.r_stop
 
-            # Angular momentum components
-            j12_x = rho1y*p1z - rho1z*p1y
-            j12_y = rho1z*p1x - rho1x*p1z
-            j12_z = rho1x*p1y - rho1y*p1x
+        stop1.terminal = True
+        stop2.terminal = True
+        stop3.terminal = True
 
-            j23_x = r23_y*p23_z - r23_z*p23_y
-            j23_y = r23_z*p23_x - r23_x*p23_z
-            j23_z = r23_x*p23_y - r23_y*p23_x        
+        tscale = self.R / np.sqrt(2 * self.E0 / self.mu312)
 
-            j31_x = r31_y*p31_z - r31_z*p31_y
-            j31_y = r31_z*p31_x - r31_x*p31_z
-            j31_z = r31_x*p31_y - r31_y*p31_x
+        logging.info("开始求解微分方程...")
 
-            # j_eff arrays
-            j12 = -0.5 + 0.5*np.sqrt(1 + 4*(j12_x**2 + j12_y**2 + j12_z**2))
-            j23 = -0.5 + 0.5*np.sqrt(1 + 4*(j23_x**2 + j23_y**2 + j23_z**2))
-            j31 = -0.5 + 0.5*np.sqrt(1 + 4*(j31_x**2 + j31_y**2 + j31_z**2))
-            
-            # Set j values
-            self.mol_12.set_jPrime(np.round(j12)[-1])
-            self.mol_23.set_jPrime(np.round(j23)[-1])
-            self.mol_31.set_jPrime(np.round(j31)[-1])
+        # 定义监控函数
+        def monitor_progress():
+            last_progress = 0
+            while not self.solve_ivp_finished:
+                with self.progress_lock:
+                    current_progress = self.progress
+                if current_progress != last_progress:
+                    logging.info(f"当前进度: {current_progress} 次微分方程调用")
+                    last_progress = current_progress
+                time.sleep(1)  # 每秒检查一次
 
-            # Calculate internal energies (evib + erot)
-            E12 = p12**2/2/self.mu12 + self.mol_12.Vij(r12) 
-            E23 = p23**2/2/self.mu23 + self.mol_23.Vij(r23)
-            E31 = p31**2/2/self.mu31 + self.mol_31.Vij(r31)
+        # 标记 solve_ivp 是否完成
+        self.solve_ivp_finished = False
 
-            # Set E attributes
-            self.mol_12.set_E(E12[-1])
-            self.mol_23.set_E(E23[-1])
-            self.mol_31.set_E(E31[-1])
-            
-            # Set bound states
-            self.mol_12.rebound()
-            self.mol_23.rebound()
-            self.mol_31.rebound()
-            
-            # Check if Eij < bound
-            try:
-                if self.mol_12.checkBound(r12[-1]):
-                    # Check for complex formation
-                    if not ((self.mol_23.checkBound(r23[-1])) or (self.mol_31.checkBound(r31[-1]))):
-                        # If bound, set turning points and vprime
-                        self.mol_12.turningPts(initial=False)
-                        self.mol_12.gaussBin(j12[-1]) # Assign gaussian weight to (v,j)
-                        self.count[0]+=1 # n12 
-                        self.set_fstate((self.mol_12.vt,self.mol_12.vw,
-                                    self.mol_12.jPrime, self.mol_12.jw))
+        # 启动监控线程
+        monitor_thread = threading.Thread(target=monitor_progress)
+        monitor_thread.start()
+
+        # 调用 solve_ivp
+        wsol = solve_ivp(
+            y0=self.w0,
+            fun=lambda t, y: self.hamEq(t, y),
+            t_span=[0, tscale * self.t_stop],
+            method='RK45',
+            rtol=self.r_tol,
+            atol=self.a_tol,
+            events=(stop1, stop2, stop3)
+        )
+
+        # 标记 solve_ivp 已完成
+        self.solve_ivp_finished = True
+
+        # 等待监控线程结束
+        monitor_thread.join()
+
+        logging.info("微分方程求解完成.")
+
+        # 处理结果
+        self.wn = wsol.y
+        self.t = wsol.t
+        x = self.wn[:6] # rho1, rho2
+        En, Vn, Kn, Ln = util.hamiltonian(self)
+    
+        self.delta_e = En[-1] - En[0] # 能量守恒
+        self.delta_l = Ln[-1] - Ln[0] # 动量守恒
+        if self.delta_e > self.econs:
+            logging.warning(f'能量守恒误差超过 {self.econs}。')
+            self.rejected += 1
+            return
+        if self.delta_l > self.lcons:
+            logging.warning(f'动量守恒误差超过 {self.lcons}。')
+            self.rejected += 1
+            return
+        
+        r12, r23, r31 = util.jac2cart(x, self.C1, self.C2)
+
+        # Recover vectors
+        rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = wsol.y
+
+        # Components
+        r23_x = rho2x - self.C1 * rho1x
+        r23_y = rho2y - self.C1 * rho1y
+        r23_z = rho2z - self.C1 * rho1z
+        r31_x = rho2x + self.C2 * rho1x
+        r31_y = rho2y + self.C2 * rho1y
+        r31_z = rho2z + self.C2 * rho1z
+
+        p23_x = self.mu23 * p2x / self.mu312 - self.mu23 * p1x / self.m2
+        p23_y = self.mu23 * p2y / self.mu312 - self.mu23 * p1y / self.m2
+        p23_z = self.mu23 * p2z / self.mu312 - self.mu23 * p1z / self.m2
+        p31_x = self.mu31 * p2x / self.mu312 + self.mu31 * p1x / self.m1
+        p31_y = self.mu31 * p2y / self.mu312 + self.mu31 * p1y / self.m1
+        p31_z = self.mu31 * p2z / self.mu312 + self.mu31 * p1z / self.m1
+
+        # Relative momenta
+        p12 = np.sqrt(p1x**2 + p1y**2 + p1z**2)
+        p23 = np.sqrt(p23_x**2 + p23_y**2 + p23_z**2)
+        p31 = np.sqrt(p31_x**2 + p31_y**2 + p31_z**2)
+
+        # Angular momentum components
+        j12_x = rho1y * p1z - rho1z * p1y
+        j12_y = rho1z * p1x - rho1x * p1z
+        j12_z = rho1x * p1y - rho1y * p1x
+
+        j23_x = r23_y * p23_z - r23_z * p23_y
+        j23_y = r23_z * p23_x - r23_x * p23_z
+        j23_z = r23_x * p23_y - r23_y * p23_x        
+
+        j31_x = r31_y * p31_z - r31_z * p31_y
+        j31_y = r31_z * p31_x - r31_x * p31_z
+        j31_z = r31_x * p31_y - r31_y * p31_x
+
+        # j_eff arrays
+        j12 = -0.5 + 0.5 * np.sqrt(1 + 4 * (j12_x**2 + j12_y**2 + j12_z**2))
+        j23 = -0.5 + 0.5 * np.sqrt(1 + 4 * (j23_x**2 + j23_y**2 + j23_z**2))
+        j31 = -0.5 + 0.5 * np.sqrt(1 + 4 * (j31_x**2 + j31_y**2 + j31_z**2))
+        
+        # Set j values
+        self.mol_12.set_jPrime(np.round(j12)[-1])
+        self.mol_23.set_jPrime(np.round(j23)[-1])
+        self.mol_31.set_jPrime(np.round(j31)[-1])
+
+        # Calculate internal energies (evib + erot)
+        E12 = p12**2 / (2 * self.mu12) + self.mol_12.Vij(r12) 
+        E23 = p23**2 / (2 * self.mu23) + self.mol_23.Vij(r23)
+        E31 = p31**2 / (2 * self.mu31) + self.mol_31.Vij(r31)
+
+        # Set E attributes
+        self.mol_12.set_E(E12[-1])
+        self.mol_23.set_E(E23[-1])
+        self.mol_31.set_E(E31[-1])
+        
+        # Set bound states
+        self.mol_12.rebound()
+        self.mol_23.rebound()
+        self.mol_31.rebound()
+        
+        # Check if Eij < bound
+        try:
+            checks = [
+                ('mol_12', self.mol_12, r12[-1], j12[-1]),
+                ('mol_23', self.mol_23, r23[-1], j23[-1]),
+                ('mol_31', self.mol_31, r31[-1], j31[-1])
+            ]
+            for name, mol, r, j in tqdm(checks, desc="检查分支绑定状态"):
+                if mol.checkBound(r):
+                    # 检查是否形成复杂体
+                    if not any([
+                        (name != 'mol_23' and self.mol_23.checkBound(r23[-1])),
+                        (name != 'mol_31' and self.mol_31.checkBound(r31[-1]))
+                    ]):
+                        mol.turningPts(initial=False)
+                        mol.gaussBin(j)
+                        if name == 'mol_12':
+                            self.count[0] += 1
+                        elif name == 'mol_23':
+                            self.count[1] += 1
+                        elif name == 'mol_31':
+                            self.count[2] += 1
+                        self.set_fstate((mol.vt, mol.vw, mol.jPrime, mol.jw))
                     else:
-                        self.count[4]+=1 # complex
-                elif self.mol_23.checkBound(r23[-1]):
-                    if not ((self.mol_31.checkBound(r31[-1])) or (self.mol_12.checkBound(r12[-1]))):
-                        self.mol_23.turningPts(initial=False)
-                        self.mol_23.gaussBin(j23[-1])
-                        self.count[1]+=1 # n23
-                        self.set_fstate((self.mol_23.vt,self.mol_23.vw,
-                                    self.mol_23.jPrime, self.mol_23.jw))
-                    else:
-                        self.count[4]+=1 # complex
-                elif self.mol_31.checkBound(r31[-1]):
-                    if not ((self.mol_12.checkBound(r12[-1])) or (self.mol_23.checkBound(r23[-1]))):
-                        self.mol_31.turningPts(initial=False)
-                        self.mol_31.gaussBin(j31[-1])
-                        self.count[2]+=1 # n31
-                        self.set_fstate((self.mol_31.vt,self.mol_31.vw,
-                                    self.mol_31.jPrime, self.mol_31.jw))
-                    else:
-                        self.count[4]+=1 # complex
+                        self.count[4] += 1 # complex
                 else:
-                    self.count[3]+=1 # dissociation
-            except:
-                self.rejected = 1
+                    self.count[3] += 1 # dissociation
+        except Exception as e:
+            logging.error(f'绑定检查过程中发生错误: {e}')
+            self.rejected = 1
 def runOneT(*args, output=False, **kwargs):
     '''
     Runs one trajectory. Use this method as input into loop.
@@ -640,7 +678,7 @@ def runN(nTraj, input_dict, cpus=os.cpu_count(), attrs=None,
                      header=os.path.isfile(short_out) == False or os.path.getsize(short_out) == 0)
     
     return full, counts
-
+'''
 if __name__ == '__main__':
     from potentials import *
     from constants import *
@@ -695,3 +733,4 @@ if __name__ == '__main__':
     print(util.get_results(traj))
     plotters.traj_plt(traj)
     plt.show()
+'''
