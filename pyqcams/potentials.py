@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import MinMaxScaler
 from scipy.optimize import fsolve
 from numba import njit
-
+import joblib
 # Existing two-body and three-body potential functions...
 # (e.g., morse, lj, buckingham, poly2, axilrod, poly3)
 
@@ -41,7 +41,21 @@ def load_MLP_model(model_path, input_dim, neuron):
     model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
     model.eval()  # Set to evaluation mode
     return model
-
+def load_scaler(scaler_path):
+    '''
+    Load the fitted scaler from the specified file path.
+    
+    Parameters:
+    - scaler_path (str): Path to the saved scaler file (e.g., 'models/scaler.pkl').
+    
+    Returns:
+    - scaler: The loaded scaler object (e.g., MinMaxScaler).
+    '''
+    if not os.path.exists(scaler_path):
+        raise FileNotFoundError(f"The scaler file at {scaler_path} was not found.")
+    
+    scaler = joblib.load(scaler_path)
+    return scaler
 def mlp_potential_function(model, scaler):
     '''
     Create a potential energy function using the loaded MLP model.
