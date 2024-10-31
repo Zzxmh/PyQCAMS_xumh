@@ -301,8 +301,13 @@ class Trajectory:
         self.mu312 = self.m3 * (self.m1 + self.m2) / self.mtot
         self.C1 = self.m1 / (self.m1 + self.m2)
         self.C2 = self.m2 / (self.m1 + self.m2)
-        self.progress = Value('i', 0)  # 定义一个整型共享变量
-        self.total_steps = 1000  # 估计的总步数，可以根据需要调整
+        
+        # 初始化进度跟踪变量和锁
+        self.progress = 0  # 使用普通整数变量
+        self.progress_lock = threading.Lock()  # 线程锁确保线程安全
+        
+        # 初始化 solve_ivp_finished
+        self.solve_ivp_finished = False  # 默认未完成
 
     def set_attrs(self):
         self.delta_e = [np.nan]
@@ -310,9 +315,10 @@ class Trajectory:
         self.wn = [np.nan]
         self.t = [np.nan]*2
 
-    def set_fstate(self,value):
+    def set_fstate(self, value):
         # Set final state for bound molecule
         self.fstate = value
+
     def iCond(self):
         '''
         Generate initial conditions for the system.
@@ -320,22 +326,22 @@ class Trajectory:
         # Reset initial molecule jPrime
         self.mol_12.set_jPrime(self.ji)
         # Set turning points for mol_12
-        self.mol_12.turningPts(initial = True)
+        self.mol_12.turningPts(initial=True)
 
         # Momentum for relative coordinate
-        p0 = np.sqrt(2*self.mu312*self.E0)
-        p1 = np.sqrt(self.mol_12.ji*(self.mol_12.ji+1))/self.mol_12.rp
+        p0 = np.sqrt(2 * self.mu312 * self.E0)
+        p1 = np.sqrt(self.mol_12.ji * (self.mol_12.ji + 1)) / self.mol_12.rp
 
         # Initial distance between atom and center of molecule
         # tau is vibrational period of the initial molecule
         rng = np.random.default_rng(self.seed)
-        self.R = self.R0 + rng.random()*self.mol_12.tau*p0/self.mu312
-        
+        self.R = self.R0 + rng.random() * self.mol_12.tau * p0 / self.mu312
+
         # Jacobi coordinates
         # Atom (relative coordinate)
         rho2x = 0
-        rho2y = self.b # impact parameter
-        rho2z = -np.sqrt(self.R**2-self.b**2)
+        rho2y = self.b  # impact parameter
+        rho2z = -np.sqrt(self.R**2 - self.b**2)
 
         # Conjugate momenta for relative coords rho2
         p2x = 0
@@ -343,30 +349,28 @@ class Trajectory:
         p2z = p0 
 
         # Define collision parameters
-        theta = np.arccos(1-2*rng.random())
-        phi = 2*np.pi*rng.random()
-        eta = 2*np.pi*rng.random()
+        theta = np.arccos(1 - 2 * rng.random())
+        phi = 2 * np.pi * rng.random()
+        eta = 2 * np.pi * rng.random()
 
-        self.ang = [theta,phi,eta] # Store as input data
+        self.ang = [theta, phi, eta]  # Store as input data
 
         # Molecule (internal coordinate)
-        rho1x = self.mol_12.rp*np.sin(theta)*np.cos(phi)
-        rho1y = self.mol_12.rp*np.sin(theta)*np.sin(phi)
-        rho1z = self.mol_12.rp*np.cos(theta)
+        rho1x = self.mol_12.rp * np.sin(theta) * np.cos(phi)
+        rho1y = self.mol_12.rp * np.sin(theta) * np.sin(phi)
+        rho1z = self.mol_12.rp * np.cos(theta)
 
         # Conjugate momenta for internal coords rho1
-        p1x = p1*(np.sin(phi)*np.cos(eta)
-                - np.cos(theta)*np.cos(phi)*np.sin(eta))
-        p1y = -p1*(np.cos(phi)*np.cos(eta)
-                + np.cos(theta)*np.sin(phi)*np.sin(eta))
-        p1z = p1*np.sin(theta)*np.sin(eta)
+        p1x = p1 * (np.sin(phi) * np.cos(eta) - np.cos(theta) * np.cos(phi) * np.sin(eta))
+        p1y = -p1 * (np.cos(phi) * np.cos(eta) + np.cos(theta) * np.sin(phi) * np.sin(eta))
+        p1z = p1 * np.sin(theta) * np.sin(eta)
 
-        self.w0 = np.array([rho1x,rho1y,rho1z,rho2x,rho2y,
-                rho2z,p1x,p1y,p1z,p2x,p2y,p2z])
+        self.w0 = np.array([rho1x, rho1y, rho1z, rho2x, rho2y,
+                            rho2z, p1x, p1y, p1z, p2x, p2y, p2z])
 
         return self.w0
         
-    def hamEq(self,t,w):
+    def hamEq(self, t, w):
         ''' Writes Hamilton's equations as a vector field. 
             Usage:
                 Input function for scipy.integrate.solve_ivp
@@ -382,40 +386,42 @@ class Trajectory:
 
         Requires DERIVATIVES of potential functions. 
         '''
-        with self.progress.get_lock():
-            self.progress.value += 1
+        # 使用锁安全地更新进度
+        with self.progress_lock:
+            self.progress += 1
+
         rho1x, rho1y, rho1z, rho2x, rho2y, rho2z, p1x, p1y, p1z, p2x, p2y, p2z = w
         r12, r23, r31 = util.jac2cart(w[:6], self.C1, self.C2)
 
         # Hamilton's equations (qdot)
-        drho1x = p1x/self.mu12
-        drho1y = p1y/self.mu12        
-        drho1z = p1z/self.mu12 
-        drho2x = p2x/self.mu312
-        drho2y = p2y/self.mu312
-        drho2z = p2z/self.mu312
+        drho1x = p1x / self.mu12
+        drho1y = p1y / self.mu12        
+        drho1z = p1z / self.mu12 
+        drho2x = p2x / self.mu312
+        drho2y = p2y / self.mu312
+        drho2z = p2z / self.mu312
 
         # Partial derivatives
-        r12drho1x = rho1x/r12
-        r12drho1y = rho1y/r12
-        r12drho1z = rho1z/r12
-        r23drho1x = (-self.C1*rho2x + self.C1**2*rho1x)/r23
-        r23drho1y = (-self.C1*rho2y + self.C1**2*rho1y)/r23
-        r23drho1z = (-self.C1*rho2z + self.C1**2*rho1z)/r23
-        r23drho2x = (rho2x - self.C1*rho1x)/r23
-        r23drho2y = (rho2y - self.C1*rho1y)/r23
-        r23drho2z = (rho2z - self.C1*rho1z)/r23
-        r31drho1x = (self.C2*rho2x + self.C2**2*rho1x)/r31
-        r31drho1y = (self.C2*rho2y + self.C2**2*rho1y)/r31
-        r31drho1z = (self.C2*rho2z + self.C2**2*rho1z)/r31
-        r31drho2x = (rho2x+self.C2*rho1x)/r31
-        r31drho2y = (rho2y+self.C2*rho1y)/r31
-        r31drho2z = (rho2z+self.C2*rho1z)/r31
+        r12drho1x = rho1x / r12
+        r12drho1y = rho1y / r12
+        r12drho1z = rho1z / r12
+        r23drho1x = (-self.C1 * rho2x + self.C1**2 * rho1x) / r23
+        r23drho1y = (-self.C1 * rho2y + self.C1**2 * rho1y) / r23
+        r23drho1z = (-self.C1 * rho2z + self.C1**2 * rho1z) / r23
+        r23drho2x = (rho2x - self.C1 * rho1x) / r23
+        r23drho2y = (rho2y - self.C1 * rho1y) / r23
+        r23drho2z = (rho2z - self.C1 * rho1z) / r23
+        r31drho1x = (self.C2 * rho2x + self.C2**2 * rho1x) / r31
+        r31drho1y = (self.C2 * rho2y + self.C2**2 * rho1y) / r31
+        r31drho1z = (self.C2 * rho2z + self.C2**2 * rho1z) / r31
+        r31drho2x = (rho2x + self.C2 * rho1x) / r31
+        r31drho2y = (rho2y + self.C2 * rho1y) / r31
+        r31drho2z = (rho2z + self.C2 * rho1z) / r31
 
         dv12 = self.mol_12.dVij
         dv23 = self.mol_23.dVij
         dv31 = self.mol_31.dVij
-    # Compute derivatives of the two-body potentials
+        # Compute derivatives of the two-body potentials
         dv12_value = dv12(r12)
         dv23_value = dv23(r23)
         dv31_value = dv31(r31)
@@ -424,7 +430,7 @@ class Trajectory:
         dvtdr12_value = self.dvtdr12(r12, r23, r31)
         dvtdr23_value = self.dvtdr23(r12, r23, r31)
         dvtdr31_value = self.dvtdr31(r12, r23, r31)
-        # Hamilton's equations (pdot)
+
         # Hamilton's equations (pdot)
         dP1x = - (dv12_value * r12drho1x + dv23_value * r23drho1x + dv31_value * r31drho1x
                 + dvtdr12_value * r12drho1x + dvtdr23_value * r23drho1x + dvtdr31_value * r31drho1x)
@@ -438,10 +444,10 @@ class Trajectory:
                 + dvtdr23_value * r23drho2y + dvtdr31_value * r31drho2y)
         dP2z = - (dv23_value * r23drho2z + dv31_value * r31drho2z
                 + dvtdr23_value * r23drho2z + dvtdr31_value * r31drho2z)
+
         # Hamilton's equations
         f = [drho1x, drho1y, drho1z, drho2x, drho2y, drho2z, 
              dP1x, dP1y, dP1z, dP2x, dP2y, dP2z]
-
 
         return f
 
@@ -491,7 +497,7 @@ class Trajectory:
 
         # 定义监控函数
         def monitor_progress():
-            last_progress = 0
+            last_progress = -1
             while not self.solve_ivp_finished:
                 with self.progress_lock:
                     current_progress = self.progress
@@ -500,9 +506,6 @@ class Trajectory:
                     last_progress = current_progress
                 time.sleep(1)  # 每秒检查一次
 
-        # 标记 solve_ivp 是否完成
-        self.solve_ivp_finished = False
-
         # 启动监控线程
         monitor_thread = threading.Thread(target=monitor_progress)
         monitor_thread.start()
@@ -510,7 +513,7 @@ class Trajectory:
         # 调用 solve_ivp
         wsol = solve_ivp(
             y0=self.w0,
-            fun=lambda t, y: self.hamEq(t, y),
+            fun=self.hamEq,
             t_span=[0, tscale * self.t_stop],
             method='RK45',
             rtol=self.r_tol,
