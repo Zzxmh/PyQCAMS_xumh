@@ -101,17 +101,17 @@ model.load_state_dict(torch.load(model_file, map_location=device))
 model.eval()
 
 # Generate test data
-r1 = np.linspace(0, 7.0, 100)
 r2 = np.linspace(0, 4.0, 100)
+r3 = np.linspace(0, 4.0, 100)
 theta_values = np.linspace(0, np.pi, 20)
-fig, axes = plt.subplots(5, 4, figsize=(24, 20))
+fig, axes = plt.subplots(5, 4, figsize=(20, 25))
 axes = axes.flatten()
 
 # Pre-compute predictions
 all_predicted_energy = []
 for theta in theta_values:
-    r1_grid, r2_grid = np.meshgrid(r1, r2)
-    r3_grid = derive_r3(r1_grid, r2_grid, theta)
+    r2_grid, r3_grid = np.meshgrid(r2, r3)
+    r1_grid = derive_r3(r2_grid, r3_grid, theta)
     test_input = np.vstack([r1_grid.flatten(), r2_grid.flatten(), r3_grid.flatten()]).T
     test_input_tensor = torch.from_numpy(test_input).float().to(device)
     with torch.no_grad():
@@ -126,7 +126,7 @@ global_min, global_max = all_predicted_energy.min(), all_predicted_energy.max()
 for idx, theta in enumerate(theta_values):
     predicted_energy_grid = all_predicted_energy[idx].reshape(r1_grid.shape)
     ax = axes[idx]
-    plot_cross_section(ax, r1_grid, r2_grid, predicted_energy_grid, f'θ = {theta:.2f} rad', vmin=global_min, vmax=global_max)
+    plot_cross_section(ax, r2_grid, r3_grid, predicted_energy_grid, f'θ = {theta:.2f} rad', vmin=global_min, vmax=global_max)
 
 # Remove extra subplots
 for j in range(idx + 1, len(axes)):
@@ -135,8 +135,7 @@ for j in range(idx + 1, len(axes)):
 # Adjust layout and add colorbar
 plt.tight_layout(rect=[0, 0.03, 0.9, 0.95])
 cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-norm = Normalize(vmin=global_min, vmax=global_max)
-sm = ScalarMappable(norm=norm, cmap='coolwarm')
+sm = ScalarMappable(cmap='coolwarm')
 sm.set_array([])
 cbar = fig.colorbar(sm, cax=cbar_ax)
 cbar.set_label('Potential Energy (eV)', fontsize=14)
