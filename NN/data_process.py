@@ -79,13 +79,7 @@ def extract_valid_data(output, r1_array, r2_array, theta_array):
         return np.array([]), np.array([])
     
     # 提取有效能量值
-    valid_energies = output[valid_indices] + 546.78
-    
-    # 找到最低能量
-    min_energy = np.min(valid_energies)
-    
-    # 平移能量值，使最低能量为 0
-    adjusted_energies = valid_energies - min_energy
+    valid_energies = output[valid_indices]
     
     # 提取 r1, r2
     r1s = r1_array[valid_indices[2]]
@@ -97,7 +91,7 @@ def extract_valid_data(output, r1_array, r2_array, theta_array):
     
     # 组合特征
     features = np.stack((r1s, r2s, r3s), axis=-1)
-    labels = adjusted_energies
+    labels = valid_energies
     
     return features, labels
 

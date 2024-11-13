@@ -79,7 +79,8 @@ class SimpleModel(nn.Module):
         # Define MLP layers
         self.fc1 = nn.Linear(input_dim, neuron)
         self.fc2 = nn.Linear(neuron, neuron)
-        self.fc3 = nn.Linear(neuron, 1)
+        self.fc3 = nn.Linear(neuron, neuron)
+        self.fc4 = nn.Linear(neuron, 1)
         
     def forward(self, x):
         """
@@ -169,10 +170,8 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
             best_loss = mean_test_loss
             best_model_wts = model.state_dict()
             patience_counter = 0
-            # Save the best model locally (overwrite if exists)
             torch.save(best_model_wts, model_save_path)
             print(f"Best model updated at epoch {epoch + 1} with Test Loss: {mean_test_loss:.6f}")
-            # Log the best model to wandb
             wandb.save(model_save_path)
         else:
             patience_counter += 1
@@ -182,10 +181,10 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
 
     # Load best model weights
     model.load_state_dict(best_model_wts)
-    # Final save (optional)
     torch.save(best_model_wts, model_save_path)
 
     return history
+
 # Data loading and preprocessing
 
 # Use os.path.join to construct the full path
@@ -282,8 +281,6 @@ criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=wandb.config.learning_rate)
 num_epochs = wandb.config.num_epochs
 patience = wandb.config.patience
-
-# Log model graph to wandb (optional)
 # To log the model graph, you need a sample input
 sample_input, _ = next(iter(train_loader))
 sample_input = sample_input.to(device)  # Move to GPU
@@ -293,6 +290,10 @@ wandb.watch(model, log="all", log_freq=100)
 
 # Training
 start_time = time.time()
+# Fit label_scaler on the training labels before passing to the model
+
+
+# Now, pass the fitted label_scaler to the training function
 history = train_model(model, train_loader, test_loader, criterion, optimizer, num_epochs, patience)
 end_time = time.time()
 
