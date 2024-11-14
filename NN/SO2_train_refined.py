@@ -21,15 +21,15 @@ wandb.init(
     config={
         "input_dim": 3,
         "neuron": 64,
-        "learning_rate": 0.0005,
-        "batch_size": 256,
-        "num_epochs": 1000,
-        "patience": 20,
+        "learning_rate": 0.0002,
+        "batch_size": 512,
+        "num_epochs": 2000,
+        "patience": 10,
         "scaler": "MinMaxScaler",
         "optimizer": "Adam",
         "loss_function": "MSELoss",
         "data_file": "energy_surface_1_1.txt",
-        "process_param_l": 1.5,
+        "process_param_l": 1.4,
         "unit_conversion": "au_to_eV",
     },
     name=f"run_{datetime.datetime.now().strftime('%y%m%d_%H%M%S')}",  # Optional: Name your run
@@ -53,19 +53,13 @@ print(f"Model will be saved to: {model_save_path}")
 
 # Model definition with integrated MinMaxScaler
 class SimpleModel(nn.Module):
-    def __init__(self, input_dim, neuron, scaler_min, scaler_scale, process_param_l=0.5):
+    def __init__(self, input_dim, neuron, process_param_l=0.5):
         super(SimpleModel, self).__init__()
         self.process_param_l = process_param_l  # Parameter 'l' from wandb.config
 
-        # Register scaler parameters as buffers (non-trainable)
-        self.register_buffer('scaler_min', torch.tensor(scaler_min, dtype=torch.float32))
-        self.register_buffer('scaler_scale', torch.tensor(scaler_scale, dtype=torch.float32))
-
-        # Define MLP layers
         self.fc1 = nn.Linear(input_dim, neuron)
         self.fc2 = nn.Linear(neuron, neuron)
-        self.fc3 = nn.Linear(neuron, neuron)
-        self.fc4 = nn.Linear(neuron, 1)
+        self.fc3 = nn.Linear(neuron, 1)
 
     def forward(self, x):
         # Ensure input has the correct shape
@@ -86,12 +80,10 @@ class SimpleModel(nn.Module):
         processed = torch.stack((x1, x2, x3), dim=1)  # Shape: (batch_size, 3)
 
         # Apply MinMax scaling: (x - min) / scale
-        scaled = (processed - self.scaler_min) / self.scaler_scale
-
+        scaled = processed
         # Pass through MLP layers with ReLU activations
-        out = F.tanh(self.fc1(scaled))
-        out = F.tanh(self.fc2(out))
-        out = F.tanh(self.fc2(out))
+        out = F.relu(self.fc1(scaled))
+        out = F.relu(self.fc2(out))
         out = self.fc3(out)
         return out
 
@@ -108,17 +100,19 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
 
         for i, (inputs, labels) in enumerate(train_loader):
             inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
+            
+            optimizer.zero_grad()  # 清空梯度
             outputs = model(inputs)
             loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
+            loss.backward()  # 计算梯度
+            optimizer.step()  # 更新参数
+
             loss_train.append(loss.item())
 
         mean_train_loss = np.mean(loss_train)
         history['train_loss'].append(mean_train_loss)
 
-        # Evaluate on test set
+        # 评估在测试集上的损失
         model.eval()
         loss_test = []
         with torch.no_grad():
@@ -140,7 +134,7 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
             "test_loss": mean_test_loss
         })
 
-        # Save best model
+        # 保存最优模型
         if mean_test_loss < best_loss:
             best_loss = mean_test_loss
             best_model_wts = model.state_dict()
@@ -154,7 +148,7 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
                 print('Early stopping')
                 break
 
-    # Load best model weights
+    # 加载最优模型权重
     model.load_state_dict(best_model_wts)
     torch.save(best_model_wts, model_save_path)
 
@@ -187,27 +181,21 @@ print(f"数据清理后样本数量: {data_df.shape[0]}")
 # 提取特征和标签
 X = data_df.iloc[:, :3].values.astype(np.float32)  # 前三列为坐标，转换为浮点数
 y = data_df.iloc[:, 3].values.reshape(-1, 1).astype(np.float32)  # 第四列为潜在能量，转换为浮点数
+# 1. 对标签y进行归一化
+import os
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
 
-# 将标签从 au 转换为 eV
-y_eV = y   # 使用定义的转换因子
-
-# 特征缩放
+# 确保 'NN' 文件夹存在
+#os.makedirs('NN', exist_ok=True)
 scaler = MinMaxScaler()
-X_scaled = scaler.fit_transform(X)
-print("特征数据已缩放。")
+#y_normalized = scaler.fit_transform(y)
+y_normalized = y
+#np.save('NN/scaler_min.npy', scaler.min_)
+#np.save('NN/scaler_scale.npy', scaler.scale_)
 
-# 标签缩放
-label_scaler = MinMaxScaler()
-y_scaled = label_scaler.fit_transform(y_eV)  # 使用转换后的 eV 标签
-print("标签数据已缩放。")
-
-# 分割数据集
-X_train, X_test, y_train, y_test = train_test_split(
-    X_scaled, y_scaled, test_size=0.2, random_state=42
-)
-print(f"训练集大小: {X_train.shape[0]}, 测试集大小: {X_test.shape[0]}")
-
-# Convert to PyTorch tensors
+# 2. 在训练数据和测试数据中使用归一化后的y
+X_train, X_test, y_train, y_test = train_test_split(X, y_normalized, test_size=0.2, random_state=42)
 train_dataset = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                               torch.tensor(y_train, dtype=torch.float32))
 test_dataset = TensorDataset(torch.tensor(X_test, dtype=torch.float32),
@@ -215,16 +203,17 @@ test_dataset = TensorDataset(torch.tensor(X_test, dtype=torch.float32),
 train_loader = DataLoader(train_dataset, batch_size=wandb.config.batch_size, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=wandb.config.batch_size, shuffle=False)
 
+
+
 # Instantiate the model with scaler parameters
 model = SimpleModel(
     input_dim=wandb.config.input_dim,
     neuron=wandb.config.neuron,
-    scaler_min=scaler.min_,
-    scaler_scale=scaler.scale_
+    process_param_l=  wandb.config.process_param_l
 ).to(device)
 
 # Set optimizer and loss function
-optimizer = optim.Adam(model.parameters(), lr=wandb.config.learning_rate)
+optimizer = optim.AdamW(model.parameters(), lr=wandb.config.learning_rate, weight_decay=1e-4)
 criterion = nn.MSELoss()
 
 # Train the model
@@ -238,6 +227,36 @@ plt.plot(history['train_loss'], label='Train Loss')
 plt.plot(history['test_loss'], label='Test Loss')
 plt.xlabel('Epochs')
 plt.ylabel('Loss')
+plt.legend()
+plt.show()
+# 4. 预测并反归一化输出
+model.eval()
+y_pred = []
+y_true = []
+
+with torch.no_grad():
+    for inputs, labels in test_loader:
+        inputs, labels = inputs.to(device), labels.to(device)
+        outputs = model(inputs)
+        y_pred.append(outputs.cpu().numpy())
+        y_true.append(labels.cpu().numpy())
+
+# Convert the list of predictions and true values to numpy arrays
+y_pred = np.concatenate(y_pred, axis=0)
+y_true = np.concatenate(y_true, axis=0)
+
+# 反归一化预测结果
+#y_pred_rescaled = scaler.inverse_transform(y_pred)
+#y_true_rescaled = scaler.inverse_transform(y_true)
+y_pred_rescaled = y_pred
+y_true_rescaled = y_true
+# Plot the true vs predicted values
+plt.figure(figsize=(10, 6))
+plt.scatter(y_true_rescaled, y_pred_rescaled, label='Predictions')
+plt.plot([min(y_true_rescaled), max(y_true_rescaled)], [min(y_true_rescaled), max(y_true_rescaled)], 'r--', label='Perfect Fit')
+plt.xlabel('True Values (eV)')
+plt.ylabel('Predicted Values (eV)')
+plt.title('True vs Predicted Values')
 plt.legend()
 plt.show()
 

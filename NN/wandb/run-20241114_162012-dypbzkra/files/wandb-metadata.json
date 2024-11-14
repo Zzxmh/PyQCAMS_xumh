@@ -1,0 +1,53 @@
+{
+    "os": "Windows-10-10.0.19045-SP0",
+    "python": "3.10.13",
+    "heartbeatAt": "2024-11-14T08:20:15.349643",
+    "startedAt": "2024-11-14T08:20:12.489373",
+    "docker": null,
+    "cuda": null,
+    "args": [],
+    "state": "running",
+    "program": "E:\\tasks\\documents_in_pku\\research\\Roaming_NN\\QCAT\\NN\\SO2_train_refined.py",
+    "codePathLocal": "SO2_train_refined.py",
+    "codePath": "NN\\SO2_train_refined.py",
+    "git": {
+        "remote": "https://github.com/Zzxmh/PyQCAMS_xumh.git",
+        "commit": "55960191718285d6f65fc19506420287d44eb76f"
+    },
+    "email": "2200011601@stu.pku.edu.cn",
+    "root": "E:/tasks/documents_in_pku/research/Roaming_NN/QCAT",
+    "host": "mycomputerXu",
+    "username": "xumohan",
+    "executable": "C:\\Users\\xumohan\\anaconda3\\envs\\py10\\python.exe",
+    "cpu_count": 4,
+    "cpu_count_logical": 8,
+    "cpu_freq": {
+        "current": 2400.0,
+        "min": 0.0,
+        "max": 2400.0
+    },
+    "cpu_freq_per_core": [
+        {
+            "current": 2400.0,
+            "min": 0.0,
+            "max": 2400.0
+        }
+    ],
+    "disk": {
+        "/": {
+            "total": 931.4960899353027,
+            "used": 615.1660575866699
+        }
+    },
+    "gpu": "NVIDIA GeForce GTX 1050",
+    "gpu_count": 1,
+    "gpu_devices": [
+        {
+            "name": "NVIDIA GeForce GTX 1050",
+            "memory_total": 3221225472
+        }
+    ],
+    "memory": {
+        "total": 31.875232696533203
+    }
+}

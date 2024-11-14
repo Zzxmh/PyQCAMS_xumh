@@ -3,7 +3,7 @@ import numpy as np
 import os
 from copy import deepcopy as copy
 import pandas as pd
-
+import seaborn as sns
 def derive_r3(r1, r2, theta):
     """
     根据 r1, r2 和 theta 计算 r3。
@@ -104,19 +104,22 @@ def main():
     lr2 = len(r2_array)
     lr3 = len(r3_array)
     lt = len(theta_array)
-    threshold = -546.78
-    alpha = 0.1
-    beta = 0.001
+    threshold = -540
+    inner_threshold_list = [[-546.78,-546.72,-546.72,-546.70,-546.70,-546.71,-546.69,-546.67,-546.65],[-546.77,-546.71,-546.71,-546.70,-546.69,-546.69,-546.67,-546.65,-546.63]]
+    alpha = 0.01
+    beta = 0.05
+    
     # 确保输出文件夹存在
     os.makedirs(data_folder_path, exist_ok=True)
     os.makedirs(fig_folder_path, exist_ok=True)
     
     for a in range(1, 11):
         for b in range(1, 3):
+            inner_threshold = inner_threshold_list[b - 1][a - 1]
             file_name = f'PLOT_{a}_{b}_contour.png'
             output = np.full((lt, lr3, lr2), np.nan)  # 初始化为 NaN
             filename = f'E:\\tasks\\documents_in_pku\\research\\roaming\\process_2\\output_{a}_{b}.txt'  # 数据文件路径
-            
+            energies = []
             try:
                 energy_data = parse_energy_data(filename)
                 sorted_energies = sort_by_number(energy_data)
@@ -129,18 +132,27 @@ def main():
                 t_index = (file_index - 1) // (lr2 * lr3)
                 r2_index = ((file_index - 1) % (lr2 * lr3)) // lr2
                 r3_index = ((file_index - 1) % (lr2 * lr3)) % lr2
-
                 # 仅当 t_index, r1_index, r2_index 在有效范围内时赋值
                 if t_index < lt and r2_index < lr2 and r3_index < lr3:
                     if energy <= threshold:
-                        output[t_index, r3_index, r2_index] = energy
+                        if energy <= inner_threshold:
+                            output[t_index, r3_index, r2_index] = energy
+                        else:
+                            output[t_index, r3_index, r2_index] = inner_threshold + 0.01*(energy - inner_threshold) /(threshold-inner_threshold)
                     else:
-                        output[t_index, r3_index, r2_index] = threshold + alpha/(1 + 10000*np.exp(-beta*(energy - threshold)))
+                        #output[t_index, r3_index, r2_index] = threshold + alpha/(1 + 10*np.exp(-beta*(energy - threshold)))
+                        output[t_index,r3_index,r2_index] = np.nan
+                        #output[t_index,r3_index,r2_index] = threshold
                     if t_index == 0 or t_index == lt-1 : 
                         output[t_index, r3_index,r2_index] = np.nan
+                energies.append(output[t_index, r3_index, r2_index])
 
                 # 对大于阈值的部分应用指数变化
-                
+            #plt.figure(figsize=(10, 6))
+            #sns.violinplot(data=energies)
+            #plt.ylabel("Adiabatic (au)")
+            #plt.xlabel("u")
+            #plt.show()
             # 提取有效的数据点并进行标准化处理
             features, labels = extract_valid_data(output, r2_array, r3_array, theta_array)
 

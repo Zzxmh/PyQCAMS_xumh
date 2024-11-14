@@ -3,7 +3,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn as nn
 from matplotlib.cm import ScalarMappable
-from matplotlib.colors import Normalize
 from sklearn.preprocessing import MinMaxScaler
 import torch.nn.functional as F
 
@@ -12,6 +11,8 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # Define model file path
 model_file = 'NN/results/best_model.pth'  # Replace with actual model path
+#scaler_min = np.load('NN/scaler_min.npy')        # Shape should be (3,)
+#scaler_scale = np.load('NN/scaler_scale.npy')    # Shape should be (3,)
 
 # Function to compute r3
 def derive_r3(r1, r2, theta):
@@ -30,7 +31,7 @@ def plot_cross_section(ax, x, y, values, title, vmin, vmax):
     ax.set_ylabel('$r_{OS}$', fontsize=10)
 
 class SimpleModel(nn.Module):
-    def __init__(self, input_dim, neuron, scaler_min, scaler_scale, process_param_l=0.5):
+    def __init__(self, input_dim, neuron, process_param_l=0.5):
         """
         Initialize the SimpleModel.
 
@@ -43,16 +44,10 @@ class SimpleModel(nn.Module):
         """
         super(SimpleModel, self).__init__()
         self.process_param_l = process_param_l  # Parameter 'l' from wandb.config
-
-        # Register scaler parameters as buffers (non-trainable)
-        self.register_buffer('scaler_min', torch.tensor(scaler_min, dtype=torch.float32))
-        self.register_buffer('scaler_scale', torch.tensor(scaler_scale, dtype=torch.float32))
-
         # Define MLP layers
         self.fc1 = nn.Linear(input_dim, neuron)
         self.fc2 = nn.Linear(neuron, neuron)
-        self.fc3 = nn.Linear(neuron, neuron)
-        self.fc4 = nn.Linear(neuron, 1)
+        self.fc3 = nn.Linear(neuron, 1)
         
     def forward(self, x):
         """
@@ -82,21 +77,18 @@ class SimpleModel(nn.Module):
         processed = torch.stack((x1, x2, x3), dim=1)  # Shape: (batch_size, 3)
 
         # Apply MinMax scaling: (x - min) / scale
-        scaled = (processed - self.scaler_min) / self.scaler_scale
-
+        #scaled = (processed - self.scaler_min) / self.scaler_scale
+        scaled = processed
         # Pass through MLP layers with ReLU activations
-        out = F.tanh(self.fc1(scaled))
-        out = F.tanh(self.fc2(out))
-        out = F.tanh(self.fc3(out))
-        out = self.fc4(out)
+        out = F.relu(self.fc1(scaled))
+        out = F.relu(self.fc2(out))
+        out = self.fc3(out)
         return out
 # Instantiate and load model
 input_dim = 3
 neuron = 64
-process_param_l = 1.5
-scaler = MinMaxScaler()
-scaler.min_, scaler.scale_ = np.array([0, 0, 0]), np.array([1, 1, 1])  # Replace with actual min and scale
-model = SimpleModel(input_dim, neuron, scaler.min_, scaler.scale_, process_param_l).to(device)
+process_param_l = 1.4
+model = SimpleModel(input_dim, neuron,process_param_l).to(device)
 model.load_state_dict(torch.load(model_file, map_location=device))
 model.eval()
 
@@ -113,10 +105,14 @@ for theta in theta_values:
     r2_grid, r3_grid = np.meshgrid(r2, r3)
     r1_grid = derive_r3(r2_grid, r3_grid, theta)
     test_input = np.vstack([r1_grid.flatten(), r2_grid.flatten(), r3_grid.flatten()]).T
+    # 使用归一化后的数据生成 tensor
     test_input_tensor = torch.from_numpy(test_input).float().to(device)
+
     with torch.no_grad():
         predicted_energy = model(test_input_tensor).cpu().numpy()
-    all_predicted_energy.append(predicted_energy)
+    #predicted_energy_transformed = predicted_energy*scaler_scale + scaler_min
+    predicted_energy_transformed = predicted_energy
+    all_predicted_energy.append(predicted_energy_transformed)
 
 # Calculate global min and max for consistent color mapping
 all_predicted_energy = np.array(all_predicted_energy)
@@ -136,7 +132,7 @@ for j in range(idx + 1, len(axes)):
 plt.tight_layout(rect=[0, 0.03, 0.9, 0.95])
 cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
 sm = ScalarMappable(cmap='coolwarm')
-sm.set_array([])
+sm.set_array([])  # Empty array to prevent warning
 cbar = fig.colorbar(sm, cax=cbar_ax)
 cbar.set_label('Potential Energy (eV)', fontsize=14)
 
