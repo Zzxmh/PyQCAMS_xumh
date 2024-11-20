@@ -11,9 +11,10 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # Define model file path
 model_file = 'NN/results/best_model.pth'  # Replace with actual model path
-#scaler_min = np.load('NN/scaler_min.npy')        # Shape should be (3,)
-#scaler_scale = np.load('NN/scaler_scale.npy')    # Shape should be (3,)
-
+scaler_X_min = np.load('NN/scaler_X_min.npy')        # Shape should be (3,)
+scaler_X_scale = np.load('NN/scaler_X_scale.npy')    # Shape should be (3,)
+scaler_y_min = np.load('NN/scaler_y_min.npy')        # Shape should be (3,)
+scaler_y_scale = np.load('NN/scaler_y_scale.npy')
 # Function to compute r3
 def derive_r3(r1, r2, theta):
     return np.sqrt(r1**2 + r2**2 - 2 * r1 * r2 * np.cos(theta))
@@ -30,35 +31,18 @@ def plot_cross_section(ax, x, y, values, title, vmin, vmax):
     ax.set_xlabel('$r_{OO}$', fontsize=10)
     ax.set_ylabel('$r_{OS}$', fontsize=10)
 
-class SimpleModel(nn.Module):
-    def __init__(self, input_dim, neuron, process_param_l=0.5):
-        """
-        Initialize the SimpleModel.
 
-        Parameters:
-        - input_dim (int): Number of input features after processing.
-        - neuron (int): Number of neurons in hidden layers.
-        - scaler_min (np.ndarray): Minimum values used for scaling (from MinMaxScaler).
-        - scaler_scale (np.ndarray): Scale values used for scaling (from MinMaxScaler).
-        - process_param_l (float): Parameter 'l' used in data processing.
-        """
+class SimpleModel(nn.Module):
+    def __init__(self, input_dim, neuron, process_param_l=0.5,dropout_rate = 0):
         super(SimpleModel, self).__init__()
         self.process_param_l = process_param_l  # Parameter 'l' from wandb.config
-        # Define MLP layers
+
         self.fc1 = nn.Linear(input_dim, neuron)
         self.fc2 = nn.Linear(neuron, neuron)
-        self.fc3 = nn.Linear(neuron, 1)
-        
+        self.fc3 = nn.Linear(neuron, 20)
+        self.dropout = nn.Dropout(dropout_rate)
+
     def forward(self, x):
-        """
-        Forward pass of the model.
-
-        Parameters:
-        - x (torch.Tensor): Raw input tensor with shape (batch_size, 3).
-
-        Returns:
-        - out (torch.Tensor): Output tensor with shape (batch_size, 1).
-        """
         # Ensure input has the correct shape
         if x.dim() == 1:
             x = x.unsqueeze(0)  # Add batch dimension if missing
@@ -77,13 +61,15 @@ class SimpleModel(nn.Module):
         processed = torch.stack((x1, x2, x3), dim=1)  # Shape: (batch_size, 3)
 
         # Apply MinMax scaling: (x - min) / scale
-        #scaled = (processed - self.scaler_min) / self.scaler_scale
         scaled = processed
         # Pass through MLP layers with ReLU activations
         out = F.relu(self.fc1(scaled))
+        out = self.dropout(out)
         out = F.relu(self.fc2(out))
+        out = self.dropout(out)
         out = self.fc3(out)
         return out
+
 # Instantiate and load model
 input_dim = 3
 neuron = 64
@@ -111,7 +97,7 @@ for theta in theta_values:
     with torch.no_grad():
         predicted_energy = model(test_input_tensor).cpu().numpy()
     #predicted_energy_transformed = predicted_energy*scaler_scale + scaler_min
-    predicted_energy_transformed = predicted_energy
+    predicted_energy_transformed = predicted_energy[0]
     all_predicted_energy.append(predicted_energy_transformed)
 
 # Calculate global min and max for consistent color mapping
